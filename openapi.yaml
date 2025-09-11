@@ -1,0 +1,67 @@
+openapi: 3.0.0
+info:
+  title: Neon Notes API
+  version: 1.0.0
+
+servers:
+  - url: https://neon-api-3a0h.onrender.com
+
+paths:
+  /health:
+    get:
+      summary: Health check
+      operationId: healthCheck
+      responses:
+        '200':
+          description: OK
+
+  /notes:
+    post:
+      summary: Create a new note
+      operationId: createNote
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                content:
+                  type: string
+                  example: "新しいメモです"
+      responses:
+        '200':
+          description: Note created
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  id:
+                    type: integer
+                  content:
+                    type: string
+                  created_at:
+                    type: string
+                    format: date-time
+
+    get:
+      summary: Get all notes
+      operationId: listNotes
+      responses:
+        '200':
+          description: List of notes
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  type: object
+                  properties:
+                    id:
+                      type: integer
+                    content:
+                      type: string
+                    created_at:
+                      type: string
+                      format: date-time
