@@ -1,7 +1,7 @@
 openapi: 3.0.0
 info:
   title: Neon Notes API
-  version: 1.0.0
+  version: "1.0.0"
 
 servers:
   - url: https://neon-api-3a0h.onrender.com
@@ -9,15 +9,35 @@ servers:
 paths:
   /health:
     get:
-      summary: Health check
-      operationId: healthCheck
+      operationId: health
+      security: []            # /health は鍵なし
       responses:
-        '200':
+        "200":
           description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok:
+                    type: boolean
+                required: [ok]
 
   /notes:
+    get:
+      operationId: listNotes
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/Note"
+        "401":
+          description: Unauthorized
     post:
-      summary: Create a new note
       operationId: createNote
       requestBody:
         required: true
@@ -28,40 +48,40 @@ paths:
               properties:
                 content:
                   type: string
-                  example: "新しいメモです"
+              required: [content]
       responses:
-        '200':
-          description: Note created
+        "201":
+          description: Created
           content:
             application/json:
               schema:
-                type: object
-                properties:
-                  id:
-                    type: integer
-                  content:
-                    type: string
-                  created_at:
-                    type: string
-                    format: date-time
+                $ref: "#/components/schemas/Note"
+        "400":
+          description: content is required
+        "401":
+          description: Unauthorized
 
-    get:
-      summary: Get all notes
-      operationId: listNotes
-      responses:
-        '200':
-          description: List of notes
-          content:
-            application/json:
-              schema:
-                type: array
-                items:
-                  type: object
-                  properties:
-                    id:
-                      type: integer
-                    content:
-                      type: string
-                    created_at:
-                      type: string
-                      format: date-time
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT   # 固定キーでもOK（表示名として使うだけ）
+
+  schemas:
+    Note:
+      type: object
+      properties:
+        id:
+          type: integer
+        content:
+          type: string
+        created_at:
+          type: string
+          format: date-time
+      required: [id, content, created_at]
+
+# 既定で全エンドポイントを「鍵必須」にする（/health は上で上書き）
+security:
+  - bearerAuth: []
+
