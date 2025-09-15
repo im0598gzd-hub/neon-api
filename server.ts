@@ -4,16 +4,14 @@ import { neon } from "@neondatabase/serverless";
 const app = express();
 app.use(express.json());
 
-// -------------------- 認証ミドルウェア（/health は除外） --------------------
+// -------------------- 認証（/health は除外） --------------------
 app.use((req: Request, res: Response, next: NextFunction) => {
   if (req.path === "/health") return next();
 
-  const expected = process.env.API_KEY; // Render の Environment に設定
-  const auth = (req.header("authorization") || "").trim(); // 受け取ったヘッダ
+  const expected = process.env.API_KEY;
+  const auth = (req.header("authorization") || "").trim();
 
-  if (!expected) {
-    return res.status(500).json({ error: "Server misconfigured" });
-  }
+  if (!expected) return res.status(500).json({ error: "Server misconfigured" });
   if (!auth || auth !== `Bearer ${expected}`) {
     return res.status(401).json({ error: "Unauthorized" });
   }
@@ -28,7 +26,7 @@ if (!DATABASE_URL) {
 }
 const sql = neon(DATABASE_URL);
 
-// DBの notes テーブルに title 列があるかどうかを起動時に検出しておく
+// notes テーブルに title 列があるか事前チェック
 let NOTES_HAS_TITLE = false;
 (async () => {
   try {
@@ -39,23 +37,18 @@ let NOTES_HAS_TITLE = false;
     `;
     NOTES_HAS_TITLE = rows.some((r: any) => r.column_name === "title");
   } catch (e) {
-    // 検出に失敗してもアプリは動かす（titleは無い前提で扱う）
     console.warn("Failed to detect columns of notes table:", e);
   }
 })();
 
-// -------------------- ヘルスチェック（公開） --------------------
-app.get("/health", (_req: Request, res: Response) => {
-  res.json({ ok: true });
-});
+// -------------------- ヘルスチェック --------------------
+app.get("/health", (_req, res) => res.json({ ok: true }));
 
-// -------------------- メモ作成（content だけ） --------------------
-// body 例: { "content": "テキスト" }
-app.post("/notes", async (req: Request, res: Response) => {
-  const content = (req.body?.content ?? "").toString();
-  if (!content) {
-    return res.status(400).json({ error: "content is required", code: 400 });
-  }
+// -------------------- 作成（contentのみ） --------------------
+app.post("/notes", async (req, res) => {
+  const content = String(req.body?.content ?? "");
+  if (!content) return res.status(400).json({ error: "content is required", code: 400 });
+
   try {
     const rows = await sql/*sql*/`
       insert into notes (content)
@@ -69,8 +62,8 @@ app.post("/notes", async (req: Request, res: Response) => {
   }
 });
 
-// -------------------- メモ一覧 --------------------
-app.get("/notes", async (_req: Request, res: Response) => {
+// -------------------- 一覧 --------------------
+app.get("/notes", async (_req, res) => {
   try {
     const rows = await sql/*sql*/`
       select id, ${NOTES_HAS_TITLE ? sql`title,` : sql``} content, created_at
@@ -85,11 +78,10 @@ app.get("/notes", async (_req: Request, res: Response) => {
   }
 });
 
-// ==================== ここから 追加分 ====================
+// ==================== 追加分 ====================
 
-// ---- 削除：DELETE /notes/:id （ハード削除） ----
-app.delete("/notes/:id", async (req: Request, res: Response) => {
-  // 数値IDチェック
+// ---- 削除：ハード削除 ----
+app.delete("/notes/:id", async (req, res) => {
   const id = Number(req.params.id);
   if (!Number.isInteger(id) || id <= 0) {
     return res.status(400).json({ error: "IDの形式が正しくありません", code: 400 });
@@ -107,17 +99,13 @@ app.delete("/notes/:id", async (req: Request, res: Response) => {
   }
 });
 
-// ---- 一部更新：PATCH /notes/:id （title / content） ----
-// 仕様：送られた項目だけ更新。未知フィールドは 400。
-// 入力規則：title=1〜200文字（空禁止） / content=0〜10000文字
-app.patch("/notes/:id", async (req: Request, res: Response) => {
-  // 数値IDチェック
+// ---- 一部更新：PATCH /notes/:id ----
+app.patch("/notes/:id", async (req, res) => {
   const id = Number(req.params.id);
   if (!Number.isInteger(id) || id <= 0) {
     return res.status(400).json({ error: "IDの形式が正しくありません", code: 400 });
   }
 
-  // 未知フィールド検出
   const allowed = ["title", "content"];
   const keys = Object.keys(req.body ?? {});
   if (keys.length === 0) {
@@ -128,16 +116,15 @@ app.patch("/notes/:id", async (req: Request, res: Response) => {
     return res.status(400).json({ error: `未知の項目があります: ${unknown.join(", ")}`, code: 400 });
   }
 
-  // 値の取り出し
   const hasTitle = keys.includes("title");
   const hasContent = keys.includes("content");
-  const title = hasTitle ? String(req.body.title ?? "") : undefined;
-  const content = hasContent ? String(req.body.content ?? "") : undefined;
 
-  // 入力規則チェック
+  const title: string = hasTitle ? String(req.body.title ?? "") : "";
+  const content: string = hasContent ? String(req.body.content ?? "") : "";
+
+  // 入力チェック
   if (hasTitle) {
     if (!NOTES_HAS_TITLE) {
-      // テーブルに title 列が無い場合は未対応として返す
       return res.status(400).json({ error: "この環境では title は更新できません（テーブルに列がありません）", code: 400 });
     }
     if (title.length < 1 || title.length > 200) {
@@ -150,26 +137,38 @@ app.patch("/notes/:id", async (req: Request, res: Response) => {
     }
   }
 
-  // 動的に UPDATE 文を組み立てる
-  const sets: any[] = [];
-  if (hasTitle) {
-    sets.push(sql`title = ${title}`);
-  }
-  if (hasContent) {
-    sets.push(sql`content = ${content}`);
-  }
-  if (sets.length === 0) {
-    return res.status(400).json({ error: "更新対象の項目がありません", code: 400 });
-  }
-
   try {
-    const rows = await sql/*sql*/`
-      update notes
-      set ${sql.join(sets, sql`, `)},
-          updated_at = now()
-      where id = ${id}
-      returning id, ${NOTES_HAS_TITLE ? sql`title,` : sql``} content, created_at, updated_at
-    `;
+    let rows: any[] = [];
+
+    if (hasTitle && hasContent && NOTES_HAS_TITLE) {
+      rows = await sql/*sql*/`
+        update notes
+        set title = ${title},
+            content = ${content},
+            updated_at = now()
+        where id = ${id}
+        returning id, title, content, created_at, updated_at
+      `;
+    } else if (hasTitle && NOTES_HAS_TITLE) {
+      rows = await sql/*sql*/`
+        update notes
+        set title = ${title},
+            updated_at = now()
+        where id = ${id}
+        returning id, title, content, created_at, updated_at
+      `;
+    } else if (hasContent) {
+      rows = await sql/*sql*/`
+        update notes
+        set content = ${content},
+            updated_at = now()
+        where id = ${id}
+        returning id, ${NOTES_HAS_TITLE ? sql`title,` : sql``} content, created_at, updated_at
+      `;
+    } else {
+      return res.status(400).json({ error: "更新対象の項目がありません", code: 400 });
+    }
+
     if (rows.length === 0) {
       return res.status(404).json({ error: "指定されたIDのメモは存在しません", code: 404 });
     }
