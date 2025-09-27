@@ -1,4 +1,3 @@
-// server.ts
 import express, { Request, Response, NextFunction } from "express";
 import cors from "cors";
 import { neon } from "@neondatabase/serverless";
@@ -83,7 +82,7 @@ app.post("/notes", requireAuth, async (req, res) => {
   }
 });
 
-// patch (partial update) — fixed placeholder numbering
+// patch (partial update)
 app.patch("/notes/:id", requireAuth, async (req, res) => {
   try {
     const id = Number(req.params.id);
@@ -103,16 +102,28 @@ app.patch("/notes/:id", requireAuth, async (req, res) => {
       values.push(c);
     }
 
-    if ("tags" in req.body && Array.isArray(req.body.tags)) {
+    if ("tags" in req.body) {
+      const t = req.body.tags;
+      if (!Array.isArray(t) || t.length === 0) {
+        return res
+          .status(400)
+          .json({ error: "tags must be a non-empty array of non-empty strings" });
+      }
+      const cleaned = t.map((x: any) => (typeof x === "string" ? x.trim() : ""))
+                       .filter((x: string) => x.length > 0);
+      if (cleaned.length === 0) {
+        return res
+          .status(400)
+          .json({ error: "tags must contain at least one non-empty string" });
+      }
       setParts.push(`tags = $${values.length + 1}`);
-      values.push(req.body.tags);
+      values.push(cleaned);
     }
 
     if (setParts.length === 0) {
       return res.status(400).json({ error: "nothing to update" });
     }
 
-    // IMPORTANT: updated_at は値をバインドしないので WHERE 番号は values.length + 1 で固定
     const whereParam = values.length + 1;
     const query = `
       update notes
@@ -152,4 +163,3 @@ app.delete("/notes/:id", requireAuth, async (req, res) => {
 app.listen(PORT, () => {
   console.log(`Server listening on :${PORT}`);
 });
-
