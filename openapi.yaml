@@ -1,30 +1,42 @@
 openapi: 3.1.0
 info:
   title: Neon Notes API
-  version: '1.0.0'
+  version: "1.0.0"
 servers:
   - url: https://neon-api-3a0h.onrender.com
+
 paths:
   /health:
     get:
+      operationId: get_health
       summary: Health check
       responses:
-        '200': { description: OK }
+        "200":
+          description: OK
+
   /notes:
     get:
+      operationId: get_notes
       summary: List notes
-      security: [{ bearerAuth: [] }]
+      description: メモを一覧取得します（created_at/updated_at はUTC。表示時はJSTに変換してください）
+      security:
+        - bearerAuth: []
       responses:
-        '200':
+        "200":
           description: OK
           content:
             application/json:
               schema:
                 type: array
-                items: { $ref: '#/components/schemas/Note' }
+                items:
+                  $ref: "#/components/schemas/Note"
+
     post:
+      operationId: post_notes
       summary: Create a note
-      security: [{ bearerAuth: [] }]
+      description: メモを新規作成します。tags は文字列配列で任意。
+      security:
+        - bearerAuth: []
       requestBody:
         required: true
         content:
@@ -33,26 +45,40 @@ paths:
               type: object
               required: [content]
               properties:
-                content: { type: string }
+                content:
+                  type: string
+                  description: 本文
                 tags:
                   type: array
-                  items: { type: string }
-                  description: タグ（例：会計, 2025-09）
+                  description: タグ一覧（例: 会計, 2025-09）
+                  items:
+                    type: string
+            examples:
+              default:
+                value:
+                  content: "今日はテストです"
+                  tags: ["会計", "2025-09"]
       responses:
-        '201':
+        "201":
           description: Created
           content:
             application/json:
-              schema: { $ref: '#/components/schemas/Note' }
+              schema:
+                $ref: "#/components/schemas/Note"
+
   /notes/{id}:
     patch:
+      operationId: patch_notes_id
       summary: Update a note partially
-      security: [{ bearerAuth: [] }]
+      description: 指定IDのメモを部分更新します。content/tags の片方だけでも可。
+      security:
+        - bearerAuth: []
       parameters:
         - in: path
           name: id
           required: true
-          schema: { type: integer }
+          schema:
+            type: integer
       requestBody:
         required: true
         content:
@@ -60,26 +86,43 @@ paths:
             schema:
               type: object
               properties:
-                content: { type: string }
+                content:
+                  type: string
                 tags:
                   type: array
-                  items: { type: string }
+                  items:
+                    type: string
+            examples:
+              updateTags:
+                value:
+                  tags: ["会計", "2025-09", "作業"]
       responses:
-        '200':
+        "200":
           description: Updated
           content:
             application/json:
-              schema: { $ref: '#/components/schemas/Note' }
+              schema:
+                $ref: "#/components/schemas/Note"
+        "404":
+          description: Not Found
+
     delete:
+      operationId: delete_notes_id
       summary: Delete a note
-      security: [{ bearerAuth: [] }]
+      description: 指定IDのメモを削除します。
+      security:
+        - bearerAuth: []
       parameters:
         - in: path
           name: id
           required: true
-          schema: { type: integer }
+          schema:
+            type: integer
       responses:
-        '204': { description: No Content }
+        "204":
+          description: No Content
+        "404":
+          description: Not Found
 
 components:
   securitySchemes:
@@ -87,14 +130,26 @@ components:
       type: http
       scheme: bearer
       bearerFormat: API_KEY
+
   schemas:
     Note:
       type: object
       properties:
-        id: { type: integer }
-        content: { type: string }
+        id:
+          type: integer
+        content:
+          type: string
         tags:
           type: array
-          items: { type: string }
-        created_at: { type: string, format: date-time, description: UTCで保持 }
-        updated_at: { type: string, format: date-time, nullable: true, description: UTCで保持 }
+          items:
+            type: string
+        created_at:
+          type: string
+          format: date-time
+          description: UTCで保持（ChatGPT表示時にJSTへ変換）
+        updated_at:
+          type: string
+          format: date-time
+          nullable: true
+          description: UTCで保持（ChatGPT表示時にJSTへ変換）
+
