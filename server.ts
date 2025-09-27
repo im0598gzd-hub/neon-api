@@ -47,8 +47,8 @@ app.get("/health", (_req, res) => res.json({ ok: true }));
 // 一覧
 app.get("/notes", requireAuth, async (_req, res) => {
   try {
-    const rows: any = await sql`
-      select id, content, created_at, updated_at
+    const rows: any[] = await sql/*sql*/`
+      select id, content, tags, created_at, updated_at
       from notes
       order by id desc
     `;
@@ -59,43 +59,71 @@ app.get("/notes", requireAuth, async (_req, res) => {
   }
 });
 
-// 追加
+// 追加（tags は任意・配列）
 app.post("/notes", requireAuth, async (req, res) => {
   try {
     const content = (req.body && req.body.content) ?? "";
     if (typeof content !== "string" || content.trim() === "") {
       return res.status(400).json({ error: "content is required (non-empty string)" });
     }
-    const rows: any = await sql`
-      insert into notes (content)
-      values (${content})
-      returning id, content, created_at, updated_at
+
+    const rawTags = (req.body && req.body.tags) ?? [];
+    const tags: string[] = Array.isArray(rawTags) ? rawTags.map(String) : [];
+
+    const rows: any[] = await sql/*sql*/`
+      insert into notes (content, tags, created_at)
+      values (${content}, ${tags}, now())
+      returning id, content, tags, created_at, updated_at
     `;
-    res.json(rows[0]);
+    res.status(201).json(rows[0]);
   } catch (e) {
     console.error(e);
     res.status(500).json({ error: "Internal Server Error" });
   }
 });
 
-// 部分更新
+// 部分更新（content / tags のいずれか・両方OK）
 app.patch("/notes/:id", requireAuth, async (req, res) => {
   try {
     const id = Number(req.params.id);
     if (!Number.isInteger(id) || id <= 0) {
       return res.status(400).json({ error: "invalid id" });
     }
-    const content = (req.body && req.body.content) ?? "";
-    if (typeof content !== "string" || content.trim() === "") {
-      return res.status(400).json({ error: "content is required (non-empty string)" });
+
+    const hasContent = typeof req.body?.content === "string";
+    const content: string | undefined = hasContent ? String(req.body.content) : undefined;
+
+    const hasTags = Array.isArray(req.body?.tags);
+    const tags: string[] | undefined = hasTags ? (req.body.tags as any[]).map(String) : undefined;
+
+    if (!hasContent && !hasTags) {
+      return res.status(400).json({ error: "nothing to update" });
     }
 
-    const rows: any = await sql`
-      update notes
-      set content = ${content}, updated_at = now()
-      where id = ${id}
-      returning id, content, created_at, updated_at
-    `;
+    let rows: any[];
+
+    if (hasContent && hasTags) {
+      rows = await sql/*sql*/`
+        update notes
+        set content = ${content!}, tags = ${tags!}, updated_at = now()
+        where id = ${id}
+        returning id, content, tags, created_at, updated_at
+      `;
+    } else if (hasContent) {
+      rows = await sql/*sql*/`
+        update notes
+        set content = ${content!}, updated_at = now()
+        where id = ${id}
+        returning id, content, tags, created_at, updated_at
+      `;
+    } else {
+      rows = await sql/*sql*/`
+        update notes
+        set tags = ${tags!}, updated_at = now()
+        where id = ${id}
+        returning id, content, tags, created_at, updated_at
+      `;
+    }
 
     if (!rows || rows.length === 0) return res.status(404).json({ error: "not found" });
     res.json(rows[0]);
@@ -112,7 +140,7 @@ app.delete("/notes/:id", requireAuth, async (req, res) => {
     if (!Number.isInteger(id) || id <= 0) {
       return res.status(400).json({ error: "invalid id" });
     }
-    const rows: any = await sql`
+    const rows: any[] = await sql/*sql*/`
       delete from notes where id = ${id}
       returning id
     `;
