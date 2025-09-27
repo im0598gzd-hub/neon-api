@@ -47,7 +47,7 @@ app.get("/health", (_req, res) => res.json({ ok: true }));
 // 一覧
 app.get("/notes", requireAuth, async (_req, res) => {
   try {
-    const rows: any[] = await sql/*sql*/`
+    const rows: any = await sql`
       select id, content, tags, created_at, updated_at
       from notes
       order by id desc
@@ -59,20 +59,18 @@ app.get("/notes", requireAuth, async (_req, res) => {
   }
 });
 
-// 追加（tags は任意・配列）
+// 追加
 app.post("/notes", requireAuth, async (req, res) => {
   try {
     const content = (req.body && req.body.content) ?? "";
     if (typeof content !== "string" || content.trim() === "") {
       return res.status(400).json({ error: "content is required (non-empty string)" });
     }
+    const tags = Array.isArray(req.body?.tags) ? req.body.tags : [];
 
-    const rawTags = (req.body && req.body.tags) ?? [];
-    const tags: string[] = Array.isArray(rawTags) ? rawTags.map(String) : [];
-
-    const rows: any[] = await sql/*sql*/`
-      insert into notes (content, tags, created_at)
-      values (${content}, ${tags}, now())
+    const rows: any = await sql`
+      insert into notes (content, tags)
+      values (${content}, ${tags})
       returning id, content, tags, created_at, updated_at
     `;
     res.status(201).json(rows[0]);
@@ -82,7 +80,7 @@ app.post("/notes", requireAuth, async (req, res) => {
   }
 });
 
-// 部分更新（content / tags のいずれか・両方OK）
+// 部分更新
 app.patch("/notes/:id", requireAuth, async (req, res) => {
   try {
     const id = Number(req.params.id);
@@ -90,40 +88,33 @@ app.patch("/notes/:id", requireAuth, async (req, res) => {
       return res.status(400).json({ error: "invalid id" });
     }
 
-    const hasContent = typeof req.body?.content === "string";
-    const content: string | undefined = hasContent ? String(req.body.content) : undefined;
+    const hasContent = Object.prototype.hasOwnProperty.call(req.body, "content");
+    const content = hasContent ? req.body.content : undefined;
+    const tags = Array.isArray(req.body?.tags) ? req.body.tags : undefined;
 
-    const hasTags = Array.isArray(req.body?.tags);
-    const tags: string[] | undefined = hasTags ? (req.body.tags as any[]).map(String) : undefined;
+    // contentが含まれているなら非空チェック
+    if (hasContent) {
+      if (typeof content !== "string" || content.trim() === "") {
+        return res.status(400).json({ error: "content must be non-empty string" });
+      }
+    }
 
-    if (!hasContent && !hasTags) {
+    // どちらも未指定ならエラー
+    if (!hasContent && !tags) {
       return res.status(400).json({ error: "nothing to update" });
     }
 
-    let rows: any[];
+    const sets: any = [];
+    if (hasContent) sets.push(sql`content = ${content}`);
+    if (tags) sets.push(sql`tags = ${tags}`);
+    sets.push(sql`updated_at = now()`);
 
-    if (hasContent && hasTags) {
-      rows = await sql/*sql*/`
-        update notes
-        set content = ${content!}, tags = ${tags!}, updated_at = now()
-        where id = ${id}
-        returning id, content, tags, created_at, updated_at
-      `;
-    } else if (hasContent) {
-      rows = await sql/*sql*/`
-        update notes
-        set content = ${content!}, updated_at = now()
-        where id = ${id}
-        returning id, content, tags, created_at, updated_at
-      `;
-    } else {
-      rows = await sql/*sql*/`
-        update notes
-        set tags = ${tags!}, updated_at = now()
-        where id = ${id}
-        returning id, content, tags, created_at, updated_at
-      `;
-    }
+    const rows: any = await sql`
+      update notes
+      set ${sql.join(sets, sql`, `)}
+      where id = ${id}
+      returning id, content, tags, created_at, updated_at
+    `;
 
     if (!rows || rows.length === 0) return res.status(404).json({ error: "not found" });
     res.json(rows[0]);
@@ -140,7 +131,7 @@ app.delete("/notes/:id", requireAuth, async (req, res) => {
     if (!Number.isInteger(id) || id <= 0) {
       return res.status(400).json({ error: "invalid id" });
     }
-    const rows: any[] = await sql/*sql*/`
+    const rows: any = await sql`
       delete from notes where id = ${id}
       returning id
     `;
