@@ -1,28 +1,33 @@
+// server.ts
 import express, { Request, Response, NextFunction } from "express";
 import cors from "cors";
 import { neon } from "@neondatabase/serverless";
 
 const app = express();
+
+// ===== Runtime config =====
 const PORT = process.env.PORT || 3000;
 const API_KEY = process.env.API_KEY || "";
 const DATABASE_URL = process.env.DATABASE_URL || "";
 
+// ===== DB client =====
 if (!DATABASE_URL) {
   console.error("DATABASE_URL is not set");
   process.exit(1);
 }
 const sql = neon(DATABASE_URL);
 
+// ===== Middlewares =====
 app.use(cors());
-app.use(express.json({ limit: "1mb" }));
+app.use(express.json({ limit: "1mb" })); // JSON本文を読む
 
-// ログ
+// 最小限ログ
 app.use((req, _res, next) => {
   console.log(`[${new Date().toISOString()}] ${req.method} ${req.path}`);
   next();
 });
 
-// 認証
+// ===== 認証（Bearer） =====
 function requireAuth(req: Request, res: Response, next: NextFunction) {
   const h = req.header("authorization") || "";
   const m = h.match(/^Bearer\s+(.+)$/i);
@@ -31,6 +36,8 @@ function requireAuth(req: Request, res: Response, next: NextFunction) {
   }
   next();
 }
+
+// ===== Routes =====
 
 // 健康チェック
 app.get("/health", (_req, res) => res.json({ ok: true }));
@@ -50,14 +57,21 @@ app.get("/notes", requireAuth, async (_req, res) => {
   }
 });
 
-// 追加
+// 追加（空文字禁止、tagsは文字列配列のみ許可）
 app.post("/notes", requireAuth, async (req, res) => {
   try {
     const content = req.body?.content;
     if (typeof content !== "string" || content.trim() === "") {
-      return res.status(400).json({ error: "content is required (non-empty string)" });
+      return res
+        .status(400)
+        .json({ error: "content is required (non-empty string)" });
     }
-    const tags = Array.isArray(req.body?.tags) ? req.body.tags : [];
+
+    const tagsRaw = req.body?.tags;
+    const tags =
+      Array.isArray(tagsRaw) && tagsRaw.every((x: any) => typeof x === "string")
+        ? (tagsRaw as string[])
+        : [];
 
     const rows: any = await sql`
       insert into notes (content, tags)
@@ -71,7 +85,7 @@ app.post("/notes", requireAuth, async (req, res) => {
   }
 });
 
-// 更新
+// 更新（content/tags のみ、部分更新可・プレースホルダずれ対策済み）
 app.patch("/notes/:id", requireAuth, async (req, res) => {
   try {
     const id = Number(req.params.id);
@@ -79,38 +93,53 @@ app.patch("/notes/:id", requireAuth, async (req, res) => {
       return res.status(400).json({ error: "invalid id" });
     }
 
-    const updates: string[] = [];
-    const values: any[] = [];
+    const set: string[] = [];
+    const params: any[] = [];
+    let p = 1;
 
-    if ("content" in req.body) {
+    // content が送られてきたときのみ検証＆更新
+    if (Object.prototype.hasOwnProperty.call(req.body, "content")) {
       const c = req.body.content;
       if (typeof c !== "string" || c.trim() === "") {
-        return res.status(400).json({ error: "content must be non-empty string" });
+        return res
+          .status(400)
+          .json({ error: "content must be non-empty string" });
       }
-      updates.push(`content = $${updates.length + 1}`);
-      values.push(c);
+      set.push(`content = $${p++}`);
+      params.push(c);
     }
 
-    if ("tags" in req.body && Array.isArray(req.body.tags)) {
-      updates.push(`tags = $${updates.length + 1}`);
-      values.push(req.body.tags);
+    // tags が送られてきたときのみ検証＆更新（文字列配列のみ受け付け）
+    if (Object.prototype.hasOwnProperty.call(req.body, "tags")) {
+      const t = req.body.tags;
+      if (!Array.isArray(t) || !t.every((x: any) => typeof x === "string")) {
+        return res
+          .status(400)
+          .json({ error: "tags must be an array of strings" });
+      }
+      set.push(`tags = $${p++}`);
+      params.push(t);
     }
 
-    if (updates.length === 0) {
+    if (set.length === 0) {
       return res.status(400).json({ error: "nothing to update" });
     }
 
-    updates.push(`updated_at = now()`);
+    // updated_at はプレースホルダ不要
+    set.push(`updated_at = now()`);
 
-    const query = `
+    const q = `
       update notes
-      set ${updates.join(", ")}
-      where id = $${updates.length + 1}
+      set ${set.join(", ")}
+      where id = $${p}
       returning id, content, tags, created_at, updated_at
     `;
 
-    const rows: any = await sql(query, [...values, id]);
-    if (!rows || rows.length === 0) return res.status(404).json({ error: "not found" });
+    // 動的SQLはunsafeを使う
+    const rows: any = await (sql as any).unsafe(q, [...params, id]);
+    if (!rows || rows.length === 0) {
+      return res.status(404).json({ error: "not found" });
+    }
     res.json(rows[0]);
   } catch (e) {
     console.error(e);
@@ -137,6 +166,7 @@ app.delete("/notes/:id", requireAuth, async (req, res) => {
   }
 });
 
+// ===== Start =====
 app.listen(PORT, () => {
   console.log(`Server listening on :${PORT}`);
 });
