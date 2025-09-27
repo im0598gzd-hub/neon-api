@@ -3,35 +3,26 @@ import cors from "cors";
 import { neon } from "@neondatabase/serverless";
 
 const app = express();
-
-// ===== Runtime config =====
 const PORT = process.env.PORT || 3000;
 const API_KEY = process.env.API_KEY || "";
 const DATABASE_URL = process.env.DATABASE_URL || "";
 
-// ===== DB client =====
 if (!DATABASE_URL) {
   console.error("DATABASE_URL is not set");
   process.exit(1);
 }
 const sql = neon(DATABASE_URL);
 
-// ===== Middlewares =====
 app.use(cors());
-app.use(express.json({ limit: "1mb" })); // JSON本文を読む
+app.use(express.json({ limit: "1mb" }));
 
-// 監査ログ（最小限）
-app.use((req: Request, _res: Response, next: NextFunction) => {
-  const hasBody =
-    (req.headers["content-length"] && Number(req.headers["content-length"]) > 0) ||
-    (req as any).body
-      ? "yes"
-      : "no";
-  console.log(`[${new Date().toISOString()}] ${req.method} ${req.path} body:${hasBody}`);
+// ログ
+app.use((req, _res, next) => {
+  console.log(`[${new Date().toISOString()}] ${req.method} ${req.path}`);
   next();
 });
 
-// 認証（Bearer）
+// 認証
 function requireAuth(req: Request, res: Response, next: NextFunction) {
   const h = req.header("authorization") || "";
   const m = h.match(/^Bearer\s+(.+)$/i);
@@ -41,7 +32,7 @@ function requireAuth(req: Request, res: Response, next: NextFunction) {
   next();
 }
 
-// ===== Routes =====
+// 健康チェック
 app.get("/health", (_req, res) => res.json({ ok: true }));
 
 // 一覧
@@ -62,7 +53,7 @@ app.get("/notes", requireAuth, async (_req, res) => {
 // 追加
 app.post("/notes", requireAuth, async (req, res) => {
   try {
-    const content = (req.body && req.body.content) ?? "";
+    const content = req.body?.content;
     if (typeof content !== "string" || content.trim() === "") {
       return res.status(400).json({ error: "content is required (non-empty string)" });
     }
@@ -80,7 +71,7 @@ app.post("/notes", requireAuth, async (req, res) => {
   }
 });
 
-// 部分更新
+// 更新
 app.patch("/notes/:id", requireAuth, async (req, res) => {
   try {
     const id = Number(req.params.id);
@@ -88,34 +79,37 @@ app.patch("/notes/:id", requireAuth, async (req, res) => {
       return res.status(400).json({ error: "invalid id" });
     }
 
-    const hasContent = Object.prototype.hasOwnProperty.call(req.body, "content");
-    const content = hasContent ? req.body.content : undefined;
-    const tags = Array.isArray(req.body?.tags) ? req.body.tags : undefined;
+    const updates: string[] = [];
+    const values: any[] = [];
 
-    // contentが含まれているなら非空チェック
-    if (hasContent) {
-      if (typeof content !== "string" || content.trim() === "") {
+    if ("content" in req.body) {
+      const c = req.body.content;
+      if (typeof c !== "string" || c.trim() === "") {
         return res.status(400).json({ error: "content must be non-empty string" });
       }
+      updates.push(`content = $${updates.length + 1}`);
+      values.push(c);
     }
 
-    // どちらも未指定ならエラー
-    if (!hasContent && !tags) {
+    if ("tags" in req.body && Array.isArray(req.body.tags)) {
+      updates.push(`tags = $${updates.length + 1}`);
+      values.push(req.body.tags);
+    }
+
+    if (updates.length === 0) {
       return res.status(400).json({ error: "nothing to update" });
     }
 
-    const sets: any = [];
-    if (hasContent) sets.push(sql`content = ${content}`);
-    if (tags) sets.push(sql`tags = ${tags}`);
-    sets.push(sql`updated_at = now()`);
+    updates.push(`updated_at = now()`);
 
-    const rows: any = await sql`
+    const query = `
       update notes
-      set ${sql.join(sets, sql`, `)}
-      where id = ${id}
+      set ${updates.join(", ")}
+      where id = $${updates.length + 1}
       returning id, content, tags, created_at, updated_at
     `;
 
+    const rows: any = await sql(query, [...values, id]);
     if (!rows || rows.length === 0) return res.status(404).json({ error: "not found" });
     res.json(rows[0]);
   } catch (e) {
