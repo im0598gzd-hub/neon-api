@@ -1,44 +1,58 @@
-openapi: 3.0.0
+openapi: 3.1.0
 info:
   title: Neon Notes API
-  version: "1.0.0"
-
+  version: '1.0.0'
 servers:
   - url: https://neon-api-3a0h.onrender.com
-
 paths:
   /health:
     get:
-      operationId: health
-      security: []            # /health は鍵なし
+      summary: Health check
       responses:
-        "200":
-          description: OK
-          content:
-            application/json:
-              schema:
-                type: object
-                properties:
-                  ok:
-                    type: boolean
-                required: [ok]
-
+        '200': { description: OK }
   /notes:
     get:
-      operationId: listNotes
+      summary: List notes
+      security: [{ bearerAuth: [] }]
       responses:
-        "200":
+        '200':
           description: OK
           content:
             application/json:
               schema:
                 type: array
-                items:
-                  $ref: "#/components/schemas/Note"
-        "401":
-          description: Unauthorized
+                items: { $ref: '#/components/schemas/Note' }
     post:
-      operationId: createNote
+      summary: Create a note
+      security: [{ bearerAuth: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [content]
+              properties:
+                content: { type: string }
+                tags:
+                  type: array
+                  items: { type: string }
+                  description: タグ（例：会計, 2025-09）
+      responses:
+        '201':
+          description: Created
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Note' }
+  /notes/{id}:
+    patch:
+      summary: Update a note partially
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema: { type: integer }
       requestBody:
         required: true
         content:
@@ -46,42 +60,41 @@ paths:
             schema:
               type: object
               properties:
-                content:
-                  type: string
-              required: [content]
+                content: { type: string }
+                tags:
+                  type: array
+                  items: { type: string }
       responses:
-        "201":
-          description: Created
+        '200':
+          description: Updated
           content:
             application/json:
-              schema:
-                $ref: "#/components/schemas/Note"
-        "400":
-          description: content is required
-        "401":
-          description: Unauthorized
+              schema: { $ref: '#/components/schemas/Note' }
+    delete:
+      summary: Delete a note
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema: { type: integer }
+      responses:
+        '204': { description: No Content }
 
 components:
   securitySchemes:
     bearerAuth:
       type: http
       scheme: bearer
-      bearerFormat: JWT   # 固定キーでもOK（表示名として使うだけ）
-
+      bearerFormat: API_KEY
   schemas:
     Note:
       type: object
       properties:
-        id:
-          type: integer
-        content:
-          type: string
-        created_at:
-          type: string
-          format: date-time
-      required: [id, content, created_at]
-
-# 既定で全エンドポイントを「鍵必須」にする（/health は上で上書き）
-security:
-  - bearerAuth: []
-
+        id: { type: integer }
+        content: { type: string }
+        tags:
+          type: array
+          items: { type: string }
+        created_at: { type: string, format: date-time, description: UTCで保持 }
+        updated_at: { type: string, format: date-time, nullable: true, description: UTCで保持 }
