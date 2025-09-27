@@ -10,24 +10,29 @@ const PORT = process.env.PORT || 3000;
 const API_KEY = process.env.API_KEY || "";
 const DATABASE_URL = process.env.DATABASE_URL || "";
 
-// ===== DB client =====
 if (!DATABASE_URL) {
   console.error("DATABASE_URL is not set");
   process.exit(1);
 }
+
 const sql = neon(DATABASE_URL);
 
 // ===== Middlewares =====
 app.use(cors());
-app.use(express.json({ limit: "1mb" })); // JSON本文を読む
+app.use(express.json({ limit: "1mb" }));
 
-// 最小限ログ
-app.use((req, _res, next) => {
-  console.log(`[${new Date().toISOString()}] ${req.method} ${req.path}`);
+// minimal audit log
+app.use((req: Request, _res: Response, next: NextFunction) => {
+  const hasBody =
+    (req.headers["content-length"] && Number(req.headers["content-length"]) > 0) ||
+    (req as any).body
+      ? "yes"
+      : "no";
+  console.log(`[${new Date().toISOString()}] ${req.method} ${req.path} body:${hasBody}`);
   next();
 });
 
-// ===== 認証（Bearer） =====
+// Auth (Bearer)
 function requireAuth(req: Request, res: Response, next: NextFunction) {
   const h = req.header("authorization") || "";
   const m = h.match(/^Bearer\s+(.+)$/i);
@@ -39,10 +44,10 @@ function requireAuth(req: Request, res: Response, next: NextFunction) {
 
 // ===== Routes =====
 
-// 健康チェック
+// health
 app.get("/health", (_req, res) => res.json({ ok: true }));
 
-// 一覧
+// list
 app.get("/notes", requireAuth, async (_req, res) => {
   try {
     const rows: any = await sql`
@@ -57,21 +62,14 @@ app.get("/notes", requireAuth, async (_req, res) => {
   }
 });
 
-// 追加（空文字禁止、tagsは文字列配列のみ許可）
+// create
 app.post("/notes", requireAuth, async (req, res) => {
   try {
     const content = req.body?.content;
     if (typeof content !== "string" || content.trim() === "") {
-      return res
-        .status(400)
-        .json({ error: "content is required (non-empty string)" });
+      return res.status(400).json({ error: "content is required (non-empty string)" });
     }
-
-    const tagsRaw = req.body?.tags;
-    const tags =
-      Array.isArray(tagsRaw) && tagsRaw.every((x: any) => typeof x === "string")
-        ? (tagsRaw as string[])
-        : [];
+    const tags = Array.isArray(req.body?.tags) ? req.body.tags : [];
 
     const rows: any = await sql`
       insert into notes (content, tags)
@@ -85,7 +83,7 @@ app.post("/notes", requireAuth, async (req, res) => {
   }
 });
 
-// 更新（content/tags のみ、部分更新可・プレースホルダずれ対策済み）
+// patch (partial update) — fixed placeholder numbering
 app.patch("/notes/:id", requireAuth, async (req, res) => {
   try {
     const id = Number(req.params.id);
@@ -93,53 +91,38 @@ app.patch("/notes/:id", requireAuth, async (req, res) => {
       return res.status(400).json({ error: "invalid id" });
     }
 
-    const set: string[] = [];
-    const params: any[] = [];
-    let p = 1;
+    const setParts: string[] = [];
+    const values: any[] = [];
 
-    // content が送られてきたときのみ検証＆更新
-    if (Object.prototype.hasOwnProperty.call(req.body, "content")) {
+    if ("content" in req.body) {
       const c = req.body.content;
       if (typeof c !== "string" || c.trim() === "") {
-        return res
-          .status(400)
-          .json({ error: "content must be non-empty string" });
+        return res.status(400).json({ error: "content must be non-empty string" });
       }
-      set.push(`content = $${p++}`);
-      params.push(c);
+      setParts.push(`content = $${values.length + 1}`);
+      values.push(c);
     }
 
-    // tags が送られてきたときのみ検証＆更新（文字列配列のみ受け付け）
-    if (Object.prototype.hasOwnProperty.call(req.body, "tags")) {
-      const t = req.body.tags;
-      if (!Array.isArray(t) || !t.every((x: any) => typeof x === "string")) {
-        return res
-          .status(400)
-          .json({ error: "tags must be an array of strings" });
-      }
-      set.push(`tags = $${p++}`);
-      params.push(t);
+    if ("tags" in req.body && Array.isArray(req.body.tags)) {
+      setParts.push(`tags = $${values.length + 1}`);
+      values.push(req.body.tags);
     }
 
-    if (set.length === 0) {
+    if (setParts.length === 0) {
       return res.status(400).json({ error: "nothing to update" });
     }
 
-    // updated_at はプレースホルダ不要
-    set.push(`updated_at = now()`);
-
-    const q = `
+    // IMPORTANT: updated_at は値をバインドしないので WHERE 番号は values.length + 1 で固定
+    const whereParam = values.length + 1;
+    const query = `
       update notes
-      set ${set.join(", ")}
-      where id = $${p}
+      set ${setParts.join(", ")}, updated_at = now()
+      where id = $${whereParam}
       returning id, content, tags, created_at, updated_at
     `;
 
-    // 動的SQLはunsafeを使う
-    const rows: any = await (sql as any).unsafe(q, [...params, id]);
-    if (!rows || rows.length === 0) {
-      return res.status(404).json({ error: "not found" });
-    }
+    const rows: any = await sql(query, [...values, id]);
+    if (!rows || rows.length === 0) return res.status(404).json({ error: "not found" });
     res.json(rows[0]);
   } catch (e) {
     console.error(e);
@@ -147,7 +130,7 @@ app.patch("/notes/:id", requireAuth, async (req, res) => {
   }
 });
 
-// 削除
+// delete
 app.delete("/notes/:id", requireAuth, async (req, res) => {
   try {
     const id = Number(req.params.id);
@@ -166,7 +149,7 @@ app.delete("/notes/:id", requireAuth, async (req, res) => {
   }
 });
 
-// ===== Start =====
 app.listen(PORT, () => {
   console.log(`Server listening on :${PORT}`);
 });
+
