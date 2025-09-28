@@ -63,26 +63,58 @@ function parseTagsQuery(raw: any): string[] {
   return normalizeTags(arr);
 }
 
+function parseOrder(raw: any): "asc" | "desc" {
+  const v = (typeof raw === "string" ? raw.toLowerCase() : "") as "asc" | "desc";
+  return v === "asc" || v === "desc" ? v : "desc";
+}
+
+function parseOrderBy(raw: any): "id" | "created_at" {
+  const v = (typeof raw === "string" ? raw.toLowerCase() : "") as "id" | "created_at";
+  return v === "created_at" ? "created_at" : "id";
+}
+
+function parseIsoDate(raw: any): string | null {
+  if (typeof raw !== "string" || raw.trim() === "") return null;
+  const d = new Date(raw);
+  if (isNaN(d.getTime())) return null;
+  // PostgresはISO 8601文字列をTIMESTAMPとして受け取れる
+  return d.toISOString();
+}
+
 // ===== Routes =====
 
 // health
 app.get("/health", (_req, res) => res.json({ ok: true }));
 
-// list + search
+// list + search + filters + sort
 app.get("/notes", requireAuth, async (req, res) => {
   try {
-    // q: 本文キーワード / tags: カンマ区切り（AND条件）/ limit / offset
+    // ---- クエリ受け取り ----
     const qRaw = typeof req.query.q === "string" ? req.query.q.trim() : "";
     const q = qRaw.length > 0 ? qRaw : "";
 
     const tags = parseTagsQuery(req.query.tags);
+    const tagsMode = (typeof req.query.tags_mode === "string" && req.query.tags_mode.toLowerCase() === "any") ? "any" : "all"; // any=OR / all=AND(既定)
 
+    const fromIso = parseIsoDate(req.query.from); // 例: 2025-09-01
+    const toIso   = parseIsoDate(req.query.to);   // 例: 2025-09-30 or 2025-09-30T23:59:59Z
+
+    // limit/offset
     const limit = Math.min(
       200,
       Math.max(1, Number.isFinite(Number(req.query.limit)) ? Number(req.query.limit) : 50)
     );
     const offset = Math.max(0, Number.isFinite(Number(req.query.offset)) ? Number(req.query.offset) : 0);
 
+    // order_by / order
+    const orderBy = parseOrderBy(req.query.order_by); // "id" | "created_at"（既定"id"）
+    const order = parseOrder(req.query.order);         // "asc" | "desc"（既定"desc"）
+
+    if (fromIso && toIso && new Date(fromIso) > new Date(toIso)) {
+      return res.status(400).json({ error: "from must be earlier than to" });
+    }
+
+    // ---- WHERE句構築 ----
     const whereParts: string[] = [];
     const values: any[] = [];
 
@@ -90,10 +122,21 @@ app.get("/notes", requireAuth, async (req, res) => {
       values.push(`%${q}%`);
       whereParts.push(`content ILIKE $${values.length}`);
     }
+
     if (tags.length > 0) {
       values.push(tags);
-      // tags（列）が指定配列を「すべて含む」@> を使用
-      whereParts.push(`tags @> $${values.length}`);
+      // all(AND): 列tags が 指定配列をすべて含む → @>
+      // any(OR):  列tags と 指定配列が重なればOK → &&
+      whereParts.push(tagsMode === "any" ? `tags && $${values.length}` : `tags @> $${values.length}`);
+    }
+
+    if (fromIso) {
+      values.push(fromIso);
+      whereParts.push(`created_at >= $${values.length}`);
+    }
+    if (toIso) {
+      values.push(toIso);
+      whereParts.push(`created_at <= $${values.length}`);
     }
 
     values.push(limit);
@@ -103,7 +146,7 @@ app.get("/notes", requireAuth, async (req, res) => {
       select id, content, tags, created_at, updated_at
       from notes
       ${whereParts.length ? `where ${whereParts.join(" AND ")}` : ""}
-      order by id desc
+      order by ${orderBy} ${order}
       limit $${values.length - 1}
       offset $${values.length}
     `;
