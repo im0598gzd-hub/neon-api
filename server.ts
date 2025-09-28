@@ -41,6 +41,19 @@ function requireAuth(req: Request, res: Response, next: NextFunction) {
   next();
 }
 
+// ===== Helper: normalize tags =====
+function normalizeTags(input: any): string[] {
+  if (!Array.isArray(input)) return [];
+  const cleaned = input
+    .map((x) => (typeof x === "string" ? x.trim() : ""))
+    .filter((x) => x.length > 0)
+    .map((x) => x.replace(/[\uFF01-\uFF5E]/g, (ch) =>
+      String.fromCharCode(ch.charCodeAt(0) - 0xFEE0)
+    )) // 全角英数→半角
+    .map((x) => /^[A-Za-z0-9]+$/.test(x) ? x.toLowerCase() : x); // 英数字は小文字化
+  return Array.from(new Set(cleaned)); // 重複除去
+}
+
 // ===== Routes =====
 
 // health
@@ -68,7 +81,11 @@ app.post("/notes", requireAuth, async (req, res) => {
     if (typeof content !== "string" || content.trim() === "") {
       return res.status(400).json({ error: "content is required (non-empty string)" });
     }
-    const tags = Array.isArray(req.body?.tags) ? req.body.tags : [];
+
+    const tags = normalizeTags(req.body?.tags);
+    if (tags.length === 0) {
+      return res.status(400).json({ error: "tags must be a non-empty array of non-empty strings" });
+    }
 
     const rows: any = await sql`
       insert into notes (content, tags)
@@ -103,21 +120,12 @@ app.patch("/notes/:id", requireAuth, async (req, res) => {
     }
 
     if ("tags" in req.body) {
-      const t = req.body.tags;
-      if (!Array.isArray(t) || t.length === 0) {
-        return res
-          .status(400)
-          .json({ error: "tags must be a non-empty array of non-empty strings" });
-      }
-      const cleaned = t.map((x: any) => (typeof x === "string" ? x.trim() : ""))
-                       .filter((x: string) => x.length > 0);
-      if (cleaned.length === 0) {
-        return res
-          .status(400)
-          .json({ error: "tags must contain at least one non-empty string" });
+      const tags = normalizeTags(req.body.tags);
+      if (tags.length === 0) {
+        return res.status(400).json({ error: "tags must be a non-empty array of non-empty strings" });
       }
       setParts.push(`tags = $${values.length + 1}`);
-      values.push(cleaned);
+      values.push(tags);
     }
 
     if (setParts.length === 0) {
