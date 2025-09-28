@@ -56,7 +56,6 @@ function normalizeTags(input: any): string[] {
   return Array.from(new Set(cleaned)); // 重複除去
 }
 
-// クエリ文字列 tags=会計,invest を配列にして正規化
 function parseTagsQuery(raw: any): string[] {
   if (typeof raw !== "string" || raw.trim() === "") return [];
   const arr = raw.split(",").map((s) => s.trim());
@@ -77,10 +76,10 @@ function parseIsoDate(raw: any): string | null {
   if (typeof raw !== "string" || raw.trim() === "") return null;
   const d = new Date(raw);
   if (isNaN(d.getTime())) return null;
-  return d.toISOString(); // PostgresがTIMESTAMPとして受理
+  return d.toISOString();
 }
 
-// 部分一致タグ条件を作る（unnest + ILIKE）
+// 部分一致タグ条件（unnest + ILIKE）
 function buildTagPartialCondition(
   column: string,
   patterns: string[],
@@ -97,48 +96,70 @@ function buildTagPartialCondition(
   return `(${clauses.join(" OR ")})`; // any
 }
 
+// ===== キーセットページング用カーソル（created_at|id を base64化） =====
+function encodeCursor(created_at: string, id: number): string {
+  return Buffer.from(`${created_at}|${id}`, "utf8").toString("base64url");
+}
+function decodeCursor(raw: any): { created_at: string; id: number } | null {
+  if (typeof raw !== "string" || raw.trim() === "") return null;
+  try {
+    const s = Buffer.from(raw, "base64url").toString("utf8");
+    const [c, i] = s.split("|");
+    const id = Number(i);
+    if (!c || !Number.isInteger(id)) return null;
+    const d = new Date(c);
+    if (isNaN(d.getTime())) return null;
+    return { created_at: d.toISOString(), id };
+  } catch {
+    return null;
+  }
+}
+
 // ===== Routes =====
 
 // health
 app.get("/health", (_req, res) => res.json({ ok: true }));
 
-// list + search + filters + sort + match modes
+// list + search + filters + sort + match modes + cursor
 app.get("/notes", requireAuth, async (req, res) => {
   try {
     // ---- 本文検索 ----
     const qRaw = typeof req.query.q === "string" ? req.query.q.trim() : "";
     const q = qRaw.length > 0 ? qRaw : "";
-    const qMode = (typeof req.query.q_mode === "string" && req.query.q_mode.toLowerCase() === "exact")
-      ? "exact"
-      : "partial"; // 既定: partial
+    const qMode =
+      typeof req.query.q_mode === "string" && req.query.q_mode.toLowerCase() === "exact"
+        ? "exact"
+        : "partial"; // 既定: partial
 
     // ---- タグ条件（新UI優先）----
-    const tagsMatch = (typeof req.query.tags_match === "string" && req.query.tags_match.toLowerCase() === "partial")
-      ? "partial"
-      : "exact"; // 既定: exact
+    const tagsMatch =
+      typeof req.query.tags_match === "string" && req.query.tags_match.toLowerCase() === "partial"
+        ? "partial"
+        : "exact"; // 既定: exact
 
-    const tagsAll  = parseTagsQuery(req.query.tags_all);
-    const tagsAny  = parseTagsQuery(req.query.tags_any);
+    const tagsAll = parseTagsQuery(req.query.tags_all);
+    const tagsAny = parseTagsQuery(req.query.tags_any);
     const tagsNone = parseTagsQuery(req.query.tags_none);
 
     // 旧パラメータ互換（tags + tags_mode）
     const legacyTags = parseTagsQuery(req.query.tags);
-    const legacyMode = (typeof req.query.tags_mode === "string" && req.query.tags_mode.toLowerCase() === "any")
-      ? "any"
-      : "all"; // 既定: all(AND)
+    const legacyMode =
+      typeof req.query.tags_mode === "string" && req.query.tags_mode.toLowerCase() === "any"
+        ? "any"
+        : "all"; // 既定: all(AND)
 
     // ---- 日付・ページング・並び ----
     const fromIso = parseIsoDate(req.query.from);
-    const toIso   = parseIsoDate(req.query.to);
+    const toIso = parseIsoDate(req.query.to);
 
     const limit = Math.min(
-      200,
+      100,
       Math.max(1, Number.isFinite(Number(req.query.limit)) ? Number(req.query.limit) : 50)
     );
-    const offset = Math.max(0, Number.isFinite(Number(req.query.offset)) ? Number(req.query.offset) : 0);
 
-    const orderBy = parseOrderBy(req.query.order_by);
-    const order   = parseOrder(req.query.order);
+    const orderBy = parseOrderBy(req.query.order_by); // "id" | "created_at"
+    const order = parseOrder(req.query.order); // "asc" | "desc"
+    const cursor = decodeCursor(req.query.cursor);
 
     if (fromIso && toIso && new Date(fromIso) > new Date(toIso)) {
       return res.status(400).json({ error: "from must be earlier than to" });
@@ -162,7 +183,6 @@ app.get("/notes", requireAuth, async (req, res) => {
     // タグ（新UIが1つでも指定されていれば優先）
     if (tagsAll.length + tagsAny.length + tagsNone.length > 0) {
       if (tagsMatch === "exact") {
-        // exact: 配列演算子で高速
         if (tagsAll.length > 0) {
           const i = values.push(tagsAll);
           whereParts.push(`tags @> $${i}`); // すべて含む
@@ -176,19 +196,11 @@ app.get("/notes", requireAuth, async (req, res) => {
           whereParts.push(`NOT (tags && $${i})`); // 含まない
         }
       } else {
-        // partial: unnest + ILIKE
-        if (tagsAll.length > 0) {
-          whereParts.push(buildTagPartialCondition("tags", tagsAll, "all", values));
-        }
-        if (tagsAny.length > 0) {
-          whereParts.push(buildTagPartialCondition("tags", tagsAny, "any", values));
-        }
-        if (tagsNone.length > 0) {
-          whereParts.push(buildTagPartialCondition("tags", tagsNone, "none", values));
-        }
+        if (tagsAll.length > 0) whereParts.push(buildTagPartialCondition("tags", tagsAll, "all", values));
+        if (tagsAny.length > 0) whereParts.push(buildTagPartialCondition("tags", tagsAny, "any", values));
+        if (tagsNone.length > 0) whereParts.push(buildTagPartialCondition("tags", tagsNone, "none", values));
       }
     } else if (legacyTags.length > 0) {
-      // 旧仕様（後方互換）
       const i = values.push(legacyTags);
       whereParts.push(legacyMode === "any" ? `tags && $${i}` : `tags @> $${i}`);
     }
@@ -203,20 +215,44 @@ app.get("/notes", requireAuth, async (req, res) => {
       whereParts.push(`created_at <= $${i}`);
     }
 
-    // ページング
-    values.push(limit);
-    values.push(offset);
+    // ---- キーセットページング（cursor）----
+    if (cursor) {
+      if (orderBy === "created_at") {
+        const cmp = order === "asc" ? ">" : "<";
+        const i1 = values.push(cursor.created_at);
+        const i2 = values.push(cursor.id);
+        whereParts.push(`(created_at, id) ${cmp} ($${i1}::timestamptz, $${i2}::int)`);
+      } else {
+        const cmp = order === "asc" ? ">" : "<";
+        const i = values.push(cursor.id);
+        whereParts.push(`id ${cmp} $${i}`);
+      }
+    }
+
+    // ---- クエリ作成 ----
+    const orderClause =
+      orderBy === "created_at"
+        ? `order by created_at ${order}, id ${order}`
+        : `order by id ${order}`;
+    const whereClause = whereParts.length ? `where ${whereParts.join(" AND ")}` : "";
 
     const query = `
       select id, content, tags, created_at, updated_at
       from notes
-      ${whereParts.length ? `where ${whereParts.join(" AND ")}` : ""}
-      order by ${orderBy} ${order}
-      limit $${values.length - 1}
-      offset $${values.length}
+      ${whereClause}
+      ${orderClause}
+      limit $${values.push(limit)}
     `;
 
     const rows: any = await sql(query, values);
+
+    // 次ページ用カーソル
+    if (rows && rows.length === limit) {
+      const last = rows[rows.length - 1];
+      const next = encodeCursor(last.created_at, last.id);
+      res.setHeader("X-Next-Cursor", next);
+    }
+
     res.json(rows);
   } catch (e) {
     console.error(e);
