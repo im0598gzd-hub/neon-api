@@ -1,4 +1,4 @@
-// server.ts（CSVをJST・日時型・2列に対応した最終版）
+// server.ts（バリデーション統一版）
 
 import express, { Request, Response, NextFunction } from "express";
 import cors from "cors";
@@ -147,9 +147,42 @@ function buildNotesFilters(req: Request) {
   return { whereClause: whereParts.length ? `where ${whereParts.join(" AND ")}` : "", values } as const;
 }
 
-// ===== Routes =====
+// ===== Validation =====
+const MAX_CONTENT_LEN = 2000;
+const MAX_TAGS = 8;
+const MAX_TAG_LEN = 32;
 
-// 公開
+function validateContent(raw: any) {
+  if (typeof raw !== "string") {
+    return { ok: false as const, error: "content must be a string" };
+  }
+  const v = raw.trim();
+  if (v.length === 0) {
+    return { ok: false as const, error: "content is required (non-empty string)" };
+  }
+  if (v.length > MAX_CONTENT_LEN) {
+    return { ok: false as const, error: `content is too long (max ${MAX_CONTENT_LEN} chars)` };
+  }
+  return { ok: true as const, value: v };
+}
+
+function validateTags(raw: any) {
+  const tags = normalizeTags(raw);
+  if (tags.length === 0) {
+    return { ok: false as const, error: "tags must be a non-empty array of non-empty strings" };
+  }
+  if (tags.length > MAX_TAGS) {
+    return { ok: false as const, error: `too many tags (max ${MAX_TAGS})` };
+  }
+  for (const t of tags) {
+    if (t.length > MAX_TAG_LEN) {
+      return { ok: false as const, error: `tag '${t.slice(0, 40)}' is too long (max ${MAX_TAG_LEN} chars)` };
+    }
+  }
+  return { ok: true as const, value: tags };
+}
+
+// ===== Routes =====
 app.get("/health", (_req, res) => res.json({ ok: true }));
 app.get("/_status", async (_req, res) => {
   try {
@@ -160,7 +193,7 @@ app.get("/_status", async (_req, res) => {
   } catch { res.status(500).json({ app: "ng" }); }
 });
 
-// 認証: /notes 一覧（既存そのまま）
+// 認証: /notes 一覧
 app.get("/notes", requireAuth, async (req, res) => {
   try {
     const orderBy = parseOrderBy(req.query.order_by);
@@ -227,7 +260,7 @@ app.get("/notes/count", requireAuth, async (req, res) => {
   } catch (e) { console.error(e); res.status(500).json({ error: "Internal Server Error" }); }
 });
 
-// 認証: CSV（JST・日時型・2列・UTF-8+BOM）
+// 認証: CSV
 app.get("/notes/export.csv", requireAuth, async (req, res) => {
   try {
     const orderBy = parseOrderBy(req.query.order_by);
@@ -242,7 +275,6 @@ app.get("/notes/export.csv", requireAuth, async (req, res) => {
       orderBy === "updated_at" ? `order by updated_at ${order}, id ${order}` :
       `order by id ${order}`;
 
-    // Excelが日時として解釈しやすい "YYYY/MM/DD HH24:MI:SS" でJSTに変換
     const rows: any = await sql(`
       select
         id,
@@ -279,42 +311,50 @@ app.get("/notes/export.csv", requireAuth, async (req, res) => {
   } catch (e) { console.error(e); res.status(500).json({ error: "Internal Server Error" }); }
 });
 
-// 認証: create / patch / delete（既存のまま）
+// 認証: create
 app.post("/notes", requireAuth, async (req, res) => {
   try {
-    const content = req.body?.content;
-    if (typeof content !== "string" || content.trim() === "") {
-      return res.status(400).json({ error: "content is required (non-empty string)" });
-    }
-    const tags = normalizeTags(req.body?.tags);
-    if (tags.length === 0) {
-      return res.status(400).json({ error: "tags must be a non-empty array of non-empty strings" });
-    }
+    const c = validateContent(req.body?.content);
+    if (!c.ok) return res.status(400).json({ error: c.error });
+
+    const t = validateTags(req.body?.tags);
+    if (!t.ok) return res.status(400).json({ error: t.error });
+
     const rows: any = await sql`
       insert into notes (content, tags)
-      values (${content}, ${tags})
+      values (${c.value}, ${t.value})
       returning id, content, tags, created_at, updated_at
     `;
     res.status(201).json(rows[0]);
-  } catch (e) { console.error(e); res.status(500).json({ error: "Internal Server Error" }); }
+  } catch (e) {
+    console.error(e);
+    res.status(500).json({ error: "Internal Server Error" });
+  }
 });
 
+// 認証: update
 app.patch("/notes/:id", requireAuth, async (req, res) => {
   try {
     const id = Number(req.params.id);
     if (!Number.isInteger(id) || id <= 0) return res.status(400).json({ error: "invalid id" });
+
     const setParts: string[] = [];
     const values: any[] = [];
+
     if ("content" in req.body) {
-      const c = req.body.content;
-      if (typeof c !== "string" || c.trim() === "") return res.status(400).json({ error: "content must be non-empty string" });
-      setParts.push(`content = $${values.length + 1}`); values.push(c);
+      const c = validateContent(req.body?.content);
+      if (!c.ok) return res.status(400).json({ error: c.error });
+      setParts.push(`content = $${values.length + 1}`);
+      values.push(c.value);
     }
+
     if ("tags" in req.body) {
-      const tags = normalizeTags(req.body.tags);
-      if (tags.length === 0) return res.status(400).json({ error: "tags must be a non-empty array of non-empty strings" });
-      setParts.push(`tags = $${values.length + 1}`); values.push(tags);
+      const t = validateTags(req.body?.tags);
+      if (!t.ok) return res.status(400).json({ error: t.error });
+      setParts.push(`tags = $${values.length + 1}`);
+      values.push(t.value);
     }
+
     if (setParts.length === 0) return res.status(400).json({ error: "nothing to update" });
 
     const query = `
@@ -324,19 +364,4 @@ app.patch("/notes/:id", requireAuth, async (req, res) => {
       returning id, content, tags, created_at, updated_at
     `;
     const rows: any = await sql(query, [...values, id]);
-    if (!rows || rows.length === 0) return res.status(404).json({ error: "not found" });
-    res.json(rows[0]);
-  } catch (e) { console.error(e); res.status(500).json({ error: "Internal Server Error" }); }
-});
-
-app.delete("/notes/:id", requireAuth, async (req, res) => {
-  try {
-    const id = Number(req.params.id);
-    if (!Number.isInteger(id) || id <= 0) return res.status(400).json({ error: "invalid id" });
-    const rows: any = await sql`delete from notes where id = ${id} returning id`;
-    if (!rows || rows.length === 0) return res.status(404).json({ error: "not found" });
-    res.status(204).send();
-  } catch (e) { console.error(e); res.status(500).json({ error: "Internal Server Error" }); }
-});
-
-app.listen(PORT, () => { console.log(`Server listening on :${PORT}`); });
+    if (!rows || rows.length === 0) return res.status
