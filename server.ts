@@ -1,4 +1,4 @@
-// server.ts（バリデーション統一版）
+// server.ts（バリデーション統一・完全版）
 
 import express, { Request, Response, NextFunction } from "express";
 import cors from "cors";
@@ -147,7 +147,7 @@ function buildNotesFilters(req: Request) {
   return { whereClause: whereParts.length ? `where ${whereParts.join(" AND ")}` : "", values } as const;
 }
 
-// ===== Validation =====
+// ===== Validation (unified) =====
 const MAX_CONTENT_LEN = 2000;
 const MAX_TAGS = 8;
 const MAX_TAG_LEN = 32;
@@ -183,6 +183,8 @@ function validateTags(raw: any) {
 }
 
 // ===== Routes =====
+
+// 公開
 app.get("/health", (_req, res) => res.json({ ok: true }));
 app.get("/_status", async (_req, res) => {
   try {
@@ -260,7 +262,7 @@ app.get("/notes/count", requireAuth, async (req, res) => {
   } catch (e) { console.error(e); res.status(500).json({ error: "Internal Server Error" }); }
 });
 
-// 認証: CSV
+// 認証: CSV（JST・日時型・UTF-8+BOM）
 app.get("/notes/export.csv", requireAuth, async (req, res) => {
   try {
     const orderBy = parseOrderBy(req.query.order_by);
@@ -364,4 +366,23 @@ app.patch("/notes/:id", requireAuth, async (req, res) => {
       returning id, content, tags, created_at, updated_at
     `;
     const rows: any = await sql(query, [...values, id]);
-    if (!rows || rows.length === 0) return res.status
+    if (!rows || rows.length === 0) return res.status(404).json({ error: "not found" });
+    res.json(rows[0]);
+  } catch (e) {
+    console.error(e);
+    res.status(500).json({ error: "Internal Server Error" });
+  }
+});
+
+// 認証: delete
+app.delete("/notes/:id", requireAuth, async (req, res) => {
+  try {
+    const id = Number(req.params.id);
+    if (!Number.isInteger(id) || id <= 0) return res.status(400).json({ error: "invalid id" });
+    const rows: any = await sql`delete from notes where id = ${id} returning id`;
+    if (!rows || rows.length === 0) return res.status(404).json({ error: "not found" });
+    res.status(204).send();
+  } catch (e) { console.error(e); res.status(500).json({ error: "Internal Server Error" }); }
+});
+
+app.listen(PORT, () => { console.log(`Server listening on :${PORT}`); });
