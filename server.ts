@@ -1,4 +1,4 @@
-// server.ts（pg_trgm 関連度しきい値付き・全文）
+// server.ts（pg_trgm 関連度・既定しきい値=0.15・全文）
 
 import express, { Request, Response, NextFunction } from "express";
 import cors from "cors";
@@ -102,7 +102,7 @@ function decodeCursor(raw: any): { created_at: string; id: number } | null {
   } catch { return null; }
 }
 
-// ===== Validation (unified) =====
+// ===== Validation =====
 const MAX_CONTENT_LEN = 2000;
 const MAX_TAGS = 8;
 const MAX_TAG_LEN = 32;
@@ -219,7 +219,6 @@ function validateFilterBody(raw: any) {
   return { ok:true as const, value: { name, q, q_mode, tags_all, tags_any, tags_none, tags_match, from_at, to_at } };
 }
 
-// 既存フィルタレコードを WHERE に反映する小ヘルパ
 function applyFilterRecord(
   f: { q?:string|null; q_mode?: "exact"|"partial"|null;
        tags_all?: string[]|null; tags_any?: string[]|null; tags_none?: string[]|null;
@@ -256,7 +255,6 @@ function applyFilterRecord(
 
 // ===== Routes =====
 
-// 公開
 app.get("/health", (_req, res) => res.json({ ok: true }));
 app.get("/_status", async (_req, res) => {
   try {
@@ -267,7 +265,7 @@ app.get("/_status", async (_req, res) => {
   } catch { res.status(500).json({ app: "ng" }); }
 });
 
-// 認証: /notes 一覧（filter_id対応 + pg_trgm 関連度＆しきい値）
+// /notes：pg_trgm 関連度 + しきい値（既定0.15）
 app.get("/notes", requireAuth, async (req, res) => {
   try {
     const orderBy = parseOrderBy(req.query.order_by);
@@ -276,39 +274,33 @@ app.get("/notes", requireAuth, async (req, res) => {
     const offset = Number.isFinite(Number(req.query.offset)) && Number(req.query.offset) >= 0 ? Number(req.query.offset) : 0;
     const cursor = decodeCursor(req.query.cursor);
 
-    // まずクエリ文字列から
     const built = buildNotesFilters(req);
     if ("error" in built) return res.status(400).json({ error: built.error });
     const whereParts: string[] = [];
     const values: any[] = [];
     if (built.whereClause) { whereParts.push(built.whereClause.replace(/^where\s+/, "")); values.push(...built.values); }
 
-    // 追加: filter_id があれば保存済みフィルタを上乗せ
     const filterId = Number(req.query.filter_id);
     if (Number.isInteger(filterId) && filterId > 0) {
       const fr: any = await sql`select q, q_mode, tags_all, tags_any, tags_none, tags_match, from_at, to_at from filters where id = ${filterId}`;
-      if (fr && fr[0]) {
-        applyFilterRecord(fr[0], whereParts, values);
-      } else {
-        return res.status(404).json({ error: "filter not found" });
-      }
+      if (fr && fr[0]) applyFilterRecord(fr[0], whereParts, values);
+      else return res.status(404).json({ error: "filter not found" });
     }
 
-    // === pg_trgm 関連度＆しきい値 ===
     const rawQ = typeof req.query.q === "string" ? req.query.q.trim() : "";
     const qModeParam = typeof req.query.q_mode === "string" && req.query.q_mode.toLowerCase() === "exact" ? "exact" : "partial";
     const useRelevance = !!rawQ && qModeParam === "partial";
-    const rankMin =
-      Number.isFinite(Number(req.query.rank_min)) ? Number(req.query.rank_min) : 0.20; // 既定 0.20
 
-    // しきい値 WHERE を追加（useRelevance のときだけ）
+    // 既定の rank_min を 0.15 に（0〜1の範囲にクリップ）
+    let rankMin = Number.isFinite(Number(req.query.rank_min)) ? Number(req.query.rank_min) : 0.15;
+    rankMin = Math.max(0, Math.min(1, rankMin));
+
     if (useRelevance) {
       const iQ = values.push(rawQ);
       const iT = values.push(rankMin);
       whereParts.push(`similarity(content, $${iQ}) >= $${iT}`);
     }
 
-    // カーソル
     if (cursor && !req.query.offset) {
       if (orderBy === "created_at") {
         const cmp = parseOrder(req.query.order) === "asc" ? ">" : "<";
@@ -328,11 +320,7 @@ app.get("/notes", requireAuth, async (req, res) => {
     }
 
     const whereClause = whereParts.length ? `where ${whereParts.join(" AND ")}` : "";
-
-    // rank をSELECTに追加（useRelevance時のみ）
     const selectRank = useRelevance ? `, similarity(content, $${values.push(rawQ)}) as _rank` : "";
-
-    // 並び順：order_by が明示されていれば従来優先。なければ関連度優先。
     const orderClause =
       useRelevance && !req.query.order_by
         ? `order by _rank desc, id desc`
@@ -361,7 +349,6 @@ app.get("/notes", requireAuth, async (req, res) => {
   } catch (e) { console.error(e); res.status(500).json({ error: "Internal Server Error" }); }
 });
 
-// 認証: 件数
 app.get("/notes/count", requireAuth, async (req, res) => {
   try {
     const built = buildNotesFilters(req);
@@ -371,7 +358,6 @@ app.get("/notes/count", requireAuth, async (req, res) => {
   } catch (e) { console.error(e); res.status(500).json({ error: "Internal Server Error" }); }
 });
 
-// 認証: CSV（JST・日時型・UTF-8+BOM）
 app.get("/notes/export.csv", requireAuth, async (req, res) => {
   try {
     const orderBy = parseOrderBy(req.query.order_by);
@@ -381,18 +367,14 @@ app.get("/notes/export.csv", requireAuth, async (req, res) => {
     const built = buildNotesFilters(req);
     if ("error" in built) return res.status(400).json({ error: built.error });
 
-    // filter_id 上乗せ（CSVでも同じ挙動）
     const whereParts: string[] = [];
     const values: any[] = [];
     if (built.whereClause) { whereParts.push(built.whereClause.replace(/^where\s+/, "")); values.push(...built.values); }
     const filterId = Number(req.query.filter_id);
     if (Number.isInteger(filterId) && filterId > 0) {
       const fr: any = await sql`select q, q_mode, tags_all, tags_any, tags_none, tags_match, from_at, to_at from filters where id = ${filterId}`;
-      if (fr && fr[0]) {
-        applyFilterRecord(fr[0], whereParts, values);
-      } else {
-        return res.status(404).json({ error: "filter not found" });
-      }
+      if (fr && fr[0]) applyFilterRecord(fr[0], whereParts, values);
+      else return res.status(404).json({ error: "filter not found" });
     }
     const whereClause = whereParts.length ? `where ${whereParts.join(" AND ")}` : "";
 
@@ -437,7 +419,6 @@ app.get("/notes/export.csv", requireAuth, async (req, res) => {
   } catch (e) { console.error(e); res.status(500).json({ error: "Internal Server Error" }); }
 });
 
-// 認証: create
 app.post("/notes", requireAuth, async (req, res) => {
   try {
     const c = validateContent(req.body?.content);
@@ -458,7 +439,6 @@ app.post("/notes", requireAuth, async (req, res) => {
   }
 });
 
-// 認証: update
 app.patch("/notes/:id", requireAuth, async (req, res) => {
   try {
     const id = Number(req.params.id);
@@ -498,7 +478,6 @@ app.patch("/notes/:id", requireAuth, async (req, res) => {
   }
 });
 
-// 認証: delete
 app.delete("/notes/:id", requireAuth, async (req, res) => {
   try {
     const id = Number(req.params.id);
