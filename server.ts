@@ -1,4 +1,4 @@
-// server.ts（短い語では _rank を出さない・UI注記用ヘッダ付き・CSVも同様）
+// server.ts（notes & filters & CSV / auth tolerant 版）
 
 import express, { Request, Response, NextFunction } from "express";
 import cors from "cors";
@@ -8,8 +8,9 @@ const app = express();
 
 // ===== Runtime config =====
 const PORT = process.env.PORT || 3000;
-const API_KEY = process.env.API_KEY || "";
+const API_KEY_ENV = process.env.API_KEY || ""; // ここは"Bearer ..."で保存されていてもOKにする
 const DATABASE_URL = process.env.DATABASE_URL || "";
+
 if (!DATABASE_URL) {
   console.error("DATABASE_URL is not set");
   process.exit(1);
@@ -19,19 +20,31 @@ const sql = neon(DATABASE_URL);
 // ===== Middlewares =====
 app.use(cors());
 app.use(express.json({ limit: "1mb" }));
+
+// minimal audit log
 app.use((req: Request, _res: Response, next: NextFunction) => {
   const hasBody =
     (req.headers["content-length"] && Number(req.headers["content-length"]) > 0) ||
-    (req as any).body ? "yes" : "no";
+    (req as any).body
+      ? "yes"
+      : "no";
   console.log(`[${new Date().toISOString()}] ${req.method} ${req.path} body:${hasBody}`);
   next();
 });
 
-// ===== Auth (Bearer) =====
+// ===== Auth (Bearer) — tolerant =====
 function requireAuth(req: Request, res: Response, next: NextFunction) {
-  const h = req.header("authorization") || "";
-  const m = h.match(/^Bearer\s+(.+)$/i);
-  if (!m || m[1] !== API_KEY) return res.status(401).json({ error: "Unauthorized" });
+  const rawAuth = req.header("authorization") || "";
+  const m = rawAuth.match(/^Bearer\s+(.+)$/i);
+  const sent = (m?.[1] ?? "").trim();
+
+  const envRaw = API_KEY_ENV.trim();
+  // Render 側に誤って "Bearer xxx" で保存されていても許容
+  const expected = envRaw.replace(/^Bearer\s+/i, "").trim();
+
+  if (!sent || !expected || sent !== expected) {
+    return res.status(401).json({ error: "Unauthorized" });
+  }
   next();
 }
 
@@ -41,7 +54,9 @@ function normalizeTags(input: any): string[] {
   const cleaned = input
     .map((x) => (typeof x === "string" ? x.trim() : ""))
     .filter((x) => x.length > 0)
-    .map((x) => x.replace(/[\uFF01-\uFF5E]/g, (ch) => String.fromCharCode(ch.charCodeAt(0) - 0xFEE0)))
+    .map((x) =>
+      x.replace(/[\uFF01-\uFF5E]/g, (ch) => String.fromCharCode(ch.charCodeAt(0) - 0xFEE0))
+    )
     .map((x) => (/^[A-Za-z0-9]+$/.test(x) ? x.toLowerCase() : x));
   return Array.from(new Set(cleaned));
 }
@@ -55,7 +70,8 @@ function parseOrder(raw: any): "asc" | "desc" {
   return v === "asc" || v === "desc" ? v : "desc";
 }
 function parseOrderBy(raw: any): "id" | "created_at" | "updated_at" {
-  const v = (typeof raw === "string" ? raw.toLowerCase() : "") as "id" | "created_at" | "updated_at";
+  const v = (typeof raw === "string" ? raw.toLowerCase() : "") as
+    | "id" | "created_at" | "updated_at";
   return v === "created_at" || v === "updated_at" ? v : "id";
 }
 function parseIsoDate(raw: any): string | null {
@@ -96,19 +112,32 @@ function decodeCursor(raw: any): { created_at: string; id: number } | null {
 const MAX_CONTENT_LEN = 2000;
 const MAX_TAGS = 8;
 const MAX_TAG_LEN = 32;
+
 function validateContent(raw: any) {
-  if (typeof raw !== "string") return { ok: false as const, error: "content must be a string" };
+  if (typeof raw !== "string") {
+    return { ok: false as const, error: "content must be a string" };
+  }
   const v = raw.trim();
-  if (v.length === 0) return { ok: false as const, error: "content is required (non-empty string)" };
-  if (v.length > MAX_CONTENT_LEN) return { ok: false as const, error: `content is too long (max ${MAX_CONTENT_LEN} chars)` };
+  if (v.length === 0) {
+    return { ok: false as const, error: "content is required (non-empty string)" };
+  }
+  if (v.length > MAX_CONTENT_LEN) {
+    return { ok: false as const, error: `content is too long (max ${MAX_CONTENT_LEN} chars)` };
+  }
   return { ok: true as const, value: v };
 }
 function validateTags(raw: any) {
   const tags = normalizeTags(raw);
-  if (tags.length === 0) return { ok: false as const, error: "tags must be a non-empty array of non-empty strings" };
-  if (tags.length > MAX_TAGS) return { ok: false as const, error: `too many tags (max ${MAX_TAGS})` };
+  if (tags.length === 0) {
+    return { ok: false as const, error: "tags must be a non-empty array of non-empty strings" };
+  }
+  if (tags.length > MAX_TAGS) {
+    return { ok: false as const, error: `too many tags (max ${MAX_TAGS})` };
+  }
   for (const t of tags) {
-    if (t.length > MAX_TAG_LEN) return { ok: false as const, error: `tag '${t.slice(0, 40)}' is too long (max ${MAX_TAG_LEN} chars)` };
+    if (t.length > MAX_TAG_LEN) {
+      return { ok: false as const, error: `tag '${t.slice(0, 40)}' is too long (max ${MAX_TAG_LEN} chars)` };
+    }
   }
   return { ok: true as const, value: tags };
 }
@@ -117,13 +146,19 @@ function validateTags(raw: any) {
 function buildNotesFilters(req: Request) {
   const qRaw = typeof req.query.q === "string" ? req.query.q.trim() : "";
   const q = qRaw.length > 0 ? qRaw : "";
-  const qMode = typeof req.query.q_mode === "string" && req.query.q_mode.toLowerCase() === "exact" ? "exact" : "partial";
-  const tagsMatch = typeof req.query.tags_match === "string" && req.query.tags_match.toLowerCase() === "partial" ? "partial" : "exact";
+  const qMode =
+    typeof req.query.q_mode === "string" && req.query.q_mode.toLowerCase() === "exact"
+      ? "exact" : "partial";
+  const tagsMatch =
+    typeof req.query.tags_match === "string" && req.query.tags_match.toLowerCase() === "partial"
+      ? "partial" : "exact";
   const tagsAll = parseTagsQuery(req.query.tags_all);
   const tagsAny = parseTagsQuery(req.query.tags_any);
   const tagsNone = parseTagsQuery(req.query.tags_none);
   const legacyTags = parseTagsQuery(req.query.tags);
-  const legacyMode = typeof req.query.tags_mode === "string" && req.query.tags_mode.toLowerCase() === "any" ? "any" : "all";
+  const legacyMode =
+    typeof req.query.tags_mode === "string" && req.query.tags_mode.toLowerCase() === "any"
+      ? "any" : "all";
   const fromIso = parseIsoDate(req.query.from);
   const toIso = parseIsoDate(req.query.to);
   if (fromIso && toIso && new Date(fromIso) > new Date(toIso)) {
@@ -221,7 +256,7 @@ function applyFilterRecord(
   if (toIso)   { const i = values.push(toIso);   whereParts.push(`created_at <= $${i}`); }
 }
 
-// ===== Routes =====
+// ===== Public routes =====
 app.get("/health", (_req, res) => res.json({ ok: true }));
 app.get("/_status", async (_req, res) => {
   try {
@@ -232,7 +267,21 @@ app.get("/_status", async (_req, res) => {
   } catch { res.status(500).json({ app: "ng" }); }
 });
 
-// ---- /notes: 検索（短い語は _rank 非表示 & threshold 自動OFF）----
+// ---- Debug (必要な時だけ有効化) ----
+if ((process.env.DEBUG_AUTH || "").trim() === "1") {
+  app.get("/__debug_api_key", (_req, res) => {
+    const envRaw = (process.env.API_KEY || "");
+    res.json({
+      present: !!envRaw,
+      len: envRaw.length,
+      head: envRaw.slice(0,4),
+      tail: envRaw.slice(-4),
+      startsWithBearer: /^Bearer\s+/i.test(envRaw),
+    });
+  });
+}
+
+// 認証: /notes 一覧（filter_id対応）
 app.get("/notes", requireAuth, async (req, res) => {
   try {
     const orderBy = parseOrderBy(req.query.order_by);
@@ -243,7 +292,6 @@ app.get("/notes", requireAuth, async (req, res) => {
 
     const built = buildNotesFilters(req);
     if ("error" in built) return res.status(400).json({ error: built.error });
-
     const whereParts: string[] = [];
     const values: any[] = [];
     if (built.whereClause) { whereParts.push(built.whereClause.replace(/^where\s+/, "")); values.push(...built.values); }
@@ -251,55 +299,46 @@ app.get("/notes", requireAuth, async (req, res) => {
     const filterId = Number(req.query.filter_id);
     if (Number.isInteger(filterId) && filterId > 0) {
       const fr: any = await sql`select q, q_mode, tags_all, tags_any, tags_none, tags_match, from_at, to_at from filters where id = ${filterId}`;
-      if (fr && fr[0]) applyFilterRecord(fr[0], whereParts, values);
-      else return res.status(404).json({ error: "filter not found" });
+      if (fr && fr[0]) {
+        applyFilterRecord(fr[0], whereParts, values);
+      } else {
+        return res.status(404).json({ error: "filter not found" });
+      }
     }
 
-    const rawQ = typeof req.query.q === "string" ? req.query.q.trim() : "";
-    const qModeParam = typeof req.query.q_mode === "string" && req.query.q_mode.toLowerCase() === "exact" ? "exact" : "partial";
-    const useRelevance = !!rawQ && qModeParam === "partial";
-    const qChars = Array.from(rawQ).length;
-
-    const applyThreshold = useRelevance && qChars >= 3;
-    const rankMin = Number.isFinite(Number(req.query.rank_min)) ? Number(req.query.rank_min) : 0.20;
-
-    if (applyThreshold) {
-      const iQ = values.push(rawQ);
-      const iT = values.push(rankMin);
-      whereParts.push(`similarity(content, $${iQ}) >= $${iT}`);
+    if (cursor && !req.query.offset) {
+      if (orderBy === "created_at") {
+        const cmp = parseOrder(req.query.order) === "asc" ? ">" : "<";
+        const i1 = values.push(cursor.created_at);
+        const i2 = values.push(cursor.id);
+        whereParts.push(`(created_at, id) ${cmp} ($${i1}::timestamptz, $${i2}::int)`);
+      } else if (orderBy === "updated_at") {
+        const cmp = parseOrder(req.query.order) === "asc" ? ">" : "<";
+        const i1 = values.push(cursor.created_at);
+        const i2 = values.push(cursor.id);
+        whereParts.push(`(updated_at, id) ${cmp} ($${i1}::timestamptz, $${i2}::int)`);
+      } else {
+        const cmp = parseOrder(req.query.order) === "asc" ? ">" : "<";
+        const i = values.push(cursor.id);
+        whereParts.push(`id ${cmp} $${i}`);
+      }
     }
 
     const whereClause = whereParts.length ? `where ${whereParts.join(" AND ")}` : "";
-
-    // 短い語では _rank を出さない
-    const includeRank = useRelevance && qChars >= 3;
-    const selectRank = includeRank ? `, similarity(content, $${values.push(rawQ)}) as _rank` : "";
-
     const orderClause =
-      includeRank && !req.query.order_by
-        ? `order by _rank desc, id desc`
-        : (orderBy === "created_at"
-            ? `order by created_at ${order}, id ${order}`
-            : orderBy === "updated_at"
-              ? `order by updated_at ${order}, id ${order}`
-              : `order by id ${order}`);
-
+      orderBy === "created_at" ? `order by created_at ${order}, id ${order}` :
+      orderBy === "updated_at" ? `order by updated_at ${order}, id ${order}` :
+      `order by id ${order}`;
     const limitParam = `$${values.push(limit)}`;
     const offsetSql = cursor || offset === 0 ? "" : ` offset $${values.push(offset)}`;
 
     const rows: any = await sql(`
-      select id, content, tags, created_at, updated_at${selectRank}
+      select id, content, tags, created_at, updated_at
       from notes
       ${whereClause}
       ${orderClause}
       limit ${limitParam}${offsetSql}
     `, values);
-
-    // UI 注記用ヘッダ
-    if (!includeRank && useRelevance) {
-      res.setHeader("X-Rank-Disabled", "1");
-      res.setHeader("X-Rank-Reason", "short_query_len_lt_3");
-    }
 
     if (!req.query.offset && rows && rows.length === limit) {
       const last = rows[rows.length - 1];
@@ -309,7 +348,7 @@ app.get("/notes", requireAuth, async (req, res) => {
   } catch (e) { console.error(e); res.status(500).json({ error: "Internal Server Error" }); }
 });
 
-// ---- /notes/count ----
+// 認証: 件数
 app.get("/notes/count", requireAuth, async (req, res) => {
   try {
     const built = buildNotesFilters(req);
@@ -319,7 +358,7 @@ app.get("/notes/count", requireAuth, async (req, res) => {
   } catch (e) { console.error(e); res.status(500).json({ error: "Internal Server Error" }); }
 });
 
-// ---- /notes/export.csv（短い語は _rank 列を出さない）----
+// 認証: CSV（JST・日時型・UTF-8+BOM）
 app.get("/notes/export.csv", requireAuth, async (req, res) => {
   try {
     const orderBy = parseOrderBy(req.query.order_by);
@@ -332,43 +371,21 @@ app.get("/notes/export.csv", requireAuth, async (req, res) => {
     const whereParts: string[] = [];
     const values: any[] = [];
     if (built.whereClause) { whereParts.push(built.whereClause.replace(/^where\s+/, "")); values.push(...built.values); }
-
     const filterId = Number(req.query.filter_id);
     if (Number.isInteger(filterId) && filterId > 0) {
       const fr: any = await sql`select q, q_mode, tags_all, tags_any, tags_none, tags_match, from_at, to_at from filters where id = ${filterId}`;
-      if (fr && fr[0]) applyFilterRecord(fr[0], whereParts, values);
-      else return res.status(404).json({ error: "filter not found" });
+      if (fr && fr[0]) {
+        applyFilterRecord(fr[0], whereParts, values);
+      } else {
+        return res.status(404).json({ error: "filter not found" });
+      }
     }
-
-    const rawQ = typeof req.query.q === "string" ? req.query.q.trim() : "";
-    const qModeParam = typeof req.query.q_mode === "string" && req.query.q_mode.toLowerCase() === "exact" ? "exact" : "partial";
-    const useRelevance = !!rawQ && qModeParam === "partial";
-    const qChars = Array.from(rawQ).length;
-
-    const applyThreshold = useRelevance && qChars >= 3;
-    const rankMin = Number.isFinite(Number(req.query.rank_min)) ? Number(req.query.rank_min) : 0.20;
-
-    if (applyThreshold) {
-      const iQ = values.push(rawQ);
-      const iT = values.push(rankMin);
-      whereParts.push(`similarity(content, $${iQ}) >= $${iT}`);
-    }
-
     const whereClause = whereParts.length ? `where ${whereParts.join(" AND ")}` : "";
 
-    // rank=1 指定でも、短い語なら列は出さない
-    const wantRank = String(req.query.rank || "").toLowerCase() === "1";
-    const outputRank = wantRank && useRelevance && qChars >= 3;
-    const selectRank = outputRank ? `, similarity(content, $${values.push(rawQ)}) as _rank` : "";
-
     const orderClause =
-      outputRank
-        ? `order by _rank desc, id desc`
-        : (orderBy === "created_at"
-            ? `order by created_at ${order}, id ${order}`
-            : orderBy === "updated_at"
-              ? `order by updated_at ${order}, id ${order}`
-              : `order by id ${order}`);
+      orderBy === "created_at" ? `order by created_at ${order}, id ${order}` :
+      orderBy === "updated_at" ? `order by updated_at ${order}, id ${order}` :
+      `order by id ${order}`;
 
     const rows: any = await sql(`
       select
@@ -377,60 +394,81 @@ app.get("/notes/export.csv", requireAuth, async (req, res) => {
         tags,
         to_char((created_at at time zone 'Asia/Tokyo'), 'YYYY/MM/DD HH24:MI:SS') as created_at_jst,
         to_char((updated_at at time zone 'Asia/Tokyo'), 'YYYY/MM/DD HH24:MI:SS') as updated_at_jst
-        ${selectRank}
       from notes
       ${whereClause}
       ${orderClause}
       limit $${values.push(limit)}
     `, values);
 
-    const header = outputRank
-      ? ["id", "content", "tags", "created_at_jst", "updated_at_jst", "_rank"]
-      : ["id", "content", "tags", "created_at_jst", "updated_at_jst"];
-
+    const header = ["id", "content", "tags", "created_at_jst", "updated_at_jst"];
     const escape = (s: any) => {
       const v = s === null || s === undefined ? "" : String(s);
       return `"${v.replace(/"/g, '""')}"`;
     };
-    const toCsvLine = (r: any) => {
-      const base = [r.id, r.content, Array.isArray(r.tags) ? r.tags.join(",") : "", r.created_at_jst, r.updated_at_jst];
-      if (outputRank) base.push(r._rank ?? "");
-      return base.map(escape).join(",");
-    };
+    const toCsvLine = (r: any) =>
+      [
+        r.id,
+        r.content,
+        Array.isArray(r.tags) ? r.tags.join(",") : "",
+        r.created_at_jst,
+        r.updated_at_jst,
+      ].map(escape).join(",");
 
     const bom = Buffer.from([0xef, 0xbb, 0xbf]);
     const csv = [header.join(","), ...(rows || []).map(toCsvLine)].join("\r\n");
+
     res.setHeader("Content-Type", "text/csv; charset=utf-8");
     res.setHeader("Content-Disposition", `attachment; filename="notes_export.csv"`);
-    if (!outputRank && useRelevance) {
-      res.setHeader("X-Rank-Disabled", "1");
-      res.setHeader("X-Rank-Reason", "short_query_len_lt_3");
-    }
     res.send(Buffer.concat([bom, Buffer.from(csv, "utf8")]));
   } catch (e) { console.error(e); res.status(500).json({ error: "Internal Server Error" }); }
 });
 
-// ---- CRUD ----
+// 認証: create
 app.post("/notes", requireAuth, async (req, res) => {
   try {
-    const c = validateContent(req.body?.content); if (!c.ok) return res.status(400).json({ error: c.error });
-    const t = validateTags(req.body?.tags);       if (!t.ok) return res.status(400).json({ error: t.error });
+    const c = validateContent(req.body?.content);
+    if (!c.ok) return res.status(400).json({ error: c.error });
+
+    const t = validateTags(req.body?.tags);
+    if (!t.ok) return res.status(400).json({ error: t.error });
+
     const rows: any = await sql`
       insert into notes (content, tags)
       values (${c.value}, ${t.value})
       returning id, content, tags, created_at, updated_at
     `;
     res.status(201).json(rows[0]);
-  } catch (e) { console.error(e); res.status(500).json({ error: "Internal Server Error" }); }
+  } catch (e) {
+    console.error(e);
+    res.status(500).json({ error: "Internal Server Error" });
+  }
 });
+
+// 認証: update
 app.patch("/notes/:id", requireAuth, async (req, res) => {
   try {
     const id = Number(req.params.id);
     if (!Number.isInteger(id) || id <= 0) return res.status(400).json({ error: "invalid id" });
-    const setParts: string[] = []; const values: any[] = [];
-    if ("content" in req.body) { const c = validateContent(req.body?.content); if (!c.ok) return res.status(400).json({ error: c.error }); setParts.push(`content = $${values.length + 1}`); values.push(c.value); }
-    if ("tags" in req.body) { const t = validateTags(req.body?.tags); if (!t.ok) return res.status(400).json({ error: t.error }); setParts.push(`tags = $${values.length + 1}`); values.push(t.value); }
+
+    const setParts: string[] = [];
+    const values: any[] = [];
+
+    if ("content" in req.body) {
+      const c = validateContent(req.body?.content);
+      if (!c.ok) return res.status(400).json({ error: c.error });
+      setParts.push(`content = $${values.length + 1}`);
+      values.push(c.value);
+    }
+
+    if ("tags" in req.body) {
+      const t = validateTags(req.body?.tags);
+      if (!t.ok) return res.status(400).json({ error: t.error });
+      setParts.push(`tags = $${values.length + 1}`);
+      values.push(t.value);
+    }
+
     if (setParts.length === 0) return res.status(400).json({ error: "nothing to update" });
+
     const query = `
       update notes
       set ${setParts.join(", ")}, updated_at = now()
@@ -440,8 +478,13 @@ app.patch("/notes/:id", requireAuth, async (req, res) => {
     const rows: any = await sql(query, [...values, id]);
     if (!rows || rows.length === 0) return res.status(404).json({ error: "not found" });
     res.json(rows[0]);
-  } catch (e) { console.error(e); res.status(500).json({ error: "Internal Server Error" }); }
+  } catch (e) {
+    console.error(e);
+    res.status(500).json({ error: "Internal Server Error" });
+  }
 });
+
+// 認証: delete
 app.delete("/notes/:id", requireAuth, async (req, res) => {
   try {
     const id = Number(req.params.id);
