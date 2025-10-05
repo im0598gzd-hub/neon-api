@@ -1,4 +1,4 @@
-// server.ts（pg_trgm 関連度・既定しきい値=0.15・全文）
+// server.ts（pg_trgm：検索&CSVに _rank / rank_min 反映・全文）
 
 import express, { Request, Response, NextFunction } from "express";
 import cors from "cors";
@@ -83,7 +83,7 @@ function buildTagPartialCondition(
     const ex = `EXISTS (SELECT 1 FROM unnest(${column}) t WHERE t ILIKE $${idx})`;
     return mode === "none" ? `NOT ${ex}` : ex;
   });
-  if (mode === "all" || mode === "none") return `(${clauses.join(" AND ")})`;
+  if (mode === "all" || "none") return `(${clauses.join(" AND ")})`;
   return `(${clauses.join(" OR ")})`;
 }
 function encodeCursor(created_at: string, id: number): string {
@@ -108,31 +108,20 @@ const MAX_TAGS = 8;
 const MAX_TAG_LEN = 32;
 
 function validateContent(raw: any) {
-  if (typeof raw !== "string") {
-    return { ok: false as const, error: "content must be a string" };
-  }
+  if (typeof raw !== "string") return { ok: false as const, error: "content must be a string" };
   const v = raw.trim();
-  if (v.length === 0) {
-    return { ok: false as const, error: "content is required (non-empty string)" };
-  }
+  if (v.length === 0) return { ok: false as const, error: "content is required (non-empty string)" };
   if (v.length > MAX_CONTENT_LEN) {
     return { ok: false as const, error: `content is too long (max ${MAX_CONTENT_LEN} chars)` };
   }
   return { ok: true as const, value: v };
 }
-
 function validateTags(raw: any) {
   const tags = normalizeTags(raw);
-  if (tags.length === 0) {
-    return { ok: false as const, error: "tags must be a non-empty array of non-empty strings" };
-  }
-  if (tags.length > MAX_TAGS) {
-    return { ok: false as const, error: `too many tags (max ${MAX_TAGS})` };
-  }
+  if (tags.length === 0) return { ok: false as const, error: "tags must be a non-empty array of non-empty strings" };
+  if (tags.length > MAX_TAGS) return { ok: false as const, error: `too many tags (max ${MAX_TAGS})` };
   for (const t of tags) {
-    if (t.length > MAX_TAG_LEN) {
-      return { ok: false as const, error: `tag '${t.slice(0, 40)}' is too long (max ${MAX_TAG_LEN} chars)` };
-    }
+    if (t.length > MAX_TAG_LEN) return { ok: false as const, error: `tag '${t.slice(0, 40)}' is too long (max ${MAX_TAG_LEN} chars)` };
   }
   return { ok: true as const, value: tags };
 }
@@ -141,19 +130,13 @@ function validateTags(raw: any) {
 function buildNotesFilters(req: Request) {
   const qRaw = typeof req.query.q === "string" ? req.query.q.trim() : "";
   const q = qRaw.length > 0 ? qRaw : "";
-  const qMode =
-    typeof req.query.q_mode === "string" && req.query.q_mode.toLowerCase() === "exact"
-      ? "exact" : "partial";
-  const tagsMatch =
-    typeof req.query.tags_match === "string" && req.query.tags_match.toLowerCase() === "partial"
-      ? "partial" : "exact";
+  const qMode = typeof req.query.q_mode === "string" && req.query.q_mode.toLowerCase() === "exact" ? "exact" : "partial";
+  const tagsMatch = typeof req.query.tags_match === "string" && req.query.tags_match.toLowerCase() === "partial" ? "partial" : "exact";
   const tagsAll = parseTagsQuery(req.query.tags_all);
   const tagsAny = parseTagsQuery(req.query.tags_any);
   const tagsNone = parseTagsQuery(req.query.tags_none);
   const legacyTags = parseTagsQuery(req.query.tags);
-  const legacyMode =
-    typeof req.query.tags_mode === "string" && req.query.tags_mode.toLowerCase() === "any"
-      ? "any" : "all";
+  const legacyMode = typeof req.query.tags_mode === "string" && req.query.tags_mode.toLowerCase() === "any" ? "any" : "all";
   const fromIso = parseIsoDate(req.query.from);
   const toIso = parseIsoDate(req.query.to);
   if (fromIso && toIso && new Date(fromIso) > new Date(toIso)) {
@@ -255,6 +238,7 @@ function applyFilterRecord(
 
 // ===== Routes =====
 
+// 公開
 app.get("/health", (_req, res) => res.json({ ok: true }));
 app.get("/_status", async (_req, res) => {
   try {
@@ -265,7 +249,7 @@ app.get("/_status", async (_req, res) => {
   } catch { res.status(500).json({ app: "ng" }); }
 });
 
-// /notes：pg_trgm 関連度 + しきい値（既定0.15）
+// 認証: /notes（pg_trgm：関連度 + rank_min）
 app.get("/notes", requireAuth, async (req, res) => {
   try {
     const orderBy = parseOrderBy(req.query.order_by);
@@ -291,10 +275,7 @@ app.get("/notes", requireAuth, async (req, res) => {
     const qModeParam = typeof req.query.q_mode === "string" && req.query.q_mode.toLowerCase() === "exact" ? "exact" : "partial";
     const useRelevance = !!rawQ && qModeParam === "partial";
 
-    // 既定の rank_min を 0.15 に（0〜1の範囲にクリップ）
-    let rankMin = Number.isFinite(Number(req.query.rank_min)) ? Number(req.query.rank_min) : 0.15;
-    rankMin = Math.max(0, Math.min(1, rankMin));
-
+    const rankMin = Number.isFinite(Number(req.query.rank_min)) ? Number(req.query.rank_min) : 0.20;
     if (useRelevance) {
       const iQ = values.push(rawQ);
       const iT = values.push(rankMin);
@@ -349,15 +330,7 @@ app.get("/notes", requireAuth, async (req, res) => {
   } catch (e) { console.error(e); res.status(500).json({ error: "Internal Server Error" }); }
 });
 
-app.get("/notes/count", requireAuth, async (req, res) => {
-  try {
-    const built = buildNotesFilters(req);
-    if ("error" in built) return res.status(400).json({ error: built.error });
-    const r: any = await sql(`select count(*)::int as total from notes ${built.whereClause}`, built.values);
-    res.json({ total: r?.[0]?.total ?? 0 });
-  } catch (e) { console.error(e); res.status(500).json({ error: "Internal Server Error" }); }
-});
-
+// 認証: CSV（JST・UTF-8+BOM）— pg_trgm対応（_rank / rank_min / rank=1）
 app.get("/notes/export.csv", requireAuth, async (req, res) => {
   try {
     const orderBy = parseOrderBy(req.query.order_by);
@@ -367,21 +340,46 @@ app.get("/notes/export.csv", requireAuth, async (req, res) => {
     const built = buildNotesFilters(req);
     if ("error" in built) return res.status(400).json({ error: built.error });
 
+    // 既存の where を分解して拡張
     const whereParts: string[] = [];
     const values: any[] = [];
     if (built.whereClause) { whereParts.push(built.whereClause.replace(/^where\s+/, "")); values.push(...built.values); }
+
+    // 保存済みフィルタ適用
     const filterId = Number(req.query.filter_id);
     if (Number.isInteger(filterId) && filterId > 0) {
       const fr: any = await sql`select q, q_mode, tags_all, tags_any, tags_none, tags_match, from_at, to_at from filters where id = ${filterId}`;
       if (fr && fr[0]) applyFilterRecord(fr[0], whereParts, values);
       else return res.status(404).json({ error: "filter not found" });
     }
+
+    // pg_trgm の rank / しきい値
+    const rawQ = typeof req.query.q === "string" ? req.query.q.trim() : "";
+    const qModeParam = typeof req.query.q_mode === "string" && req.query.q_mode.toLowerCase() === "exact" ? "exact" : "partial";
+    const useRelevance = !!rawQ && qModeParam === "partial";
+    const rankMin = Number.isFinite(Number(req.query.rank_min)) ? Number(req.query.rank_min) : 0.20;
+    const wantRank = String(req.query.rank || "").toLowerCase() === "1";
+
+    if (useRelevance) {
+      const iQ = values.push(rawQ);
+      const iT = values.push(rankMin);
+      whereParts.push(`similarity(content, $${iQ}) >= $${iT}`);
+    }
+
     const whereClause = whereParts.length ? `where ${whereParts.join(" AND ")}` : "";
 
+    // SELECT 列
+    const selectRank = (useRelevance && wantRank) ? `, similarity(content, $${values.push(rawQ)}) as _rank` : "";
+
+    // 並び順：rank=1 のときは _rank を優先、それ以外は従来
     const orderClause =
-      orderBy === "created_at" ? `order by created_at ${order}, id ${order}` :
-      orderBy === "updated_at" ? `order by updated_at ${order}, id ${order}` :
-      `order by id ${order}`;
+      (useRelevance && wantRank)
+        ? `order by _rank desc, id desc`
+        : (orderBy === "created_at"
+            ? `order by created_at ${order}, id ${order}`
+            : orderBy === "updated_at"
+              ? `order by updated_at ${order}, id ${order}`
+              : `order by id ${order}`);
 
     const rows: any = await sql(`
       select
@@ -390,25 +388,33 @@ app.get("/notes/export.csv", requireAuth, async (req, res) => {
         tags,
         to_char((created_at at time zone 'Asia/Tokyo'), 'YYYY/MM/DD HH24:MI:SS') as created_at_jst,
         to_char((updated_at at time zone 'Asia/Tokyo'), 'YYYY/MM/DD HH24:MI:SS') as updated_at_jst
+        ${selectRank}
       from notes
       ${whereClause}
       ${orderClause}
       limit $${values.push(limit)}
     `, values);
 
-    const header = ["id", "content", "tags", "created_at_jst", "updated_at_jst"];
+    // CSV 出力
+    const header = wantRank
+      ? ["id", "content", "tags", "created_at_jst", "updated_at_jst", "_rank"]
+      : ["id", "content", "tags", "created_at_jst", "updated_at_jst"];
+
     const escape = (s: any) => {
       const v = s === null || s === undefined ? "" : String(s);
       return `"${v.replace(/"/g, '""')}"`;
     };
-    const toCsvLine = (r: any) =>
-      [
+    const toCsvLine = (r: any) => {
+      const base = [
         r.id,
         r.content,
         Array.isArray(r.tags) ? r.tags.join(",") : "",
         r.created_at_jst,
         r.updated_at_jst,
-      ].map(escape).join(",");
+      ];
+      if (wantRank) base.push(r._rank ?? "");
+      return base.map(escape).join(",");
+    };
 
     const bom = Buffer.from([0xef, 0xbb, 0xbf]);
     const csv = [header.join(","), ...(rows || []).map(toCsvLine)].join("\r\n");
@@ -419,11 +425,11 @@ app.get("/notes/export.csv", requireAuth, async (req, res) => {
   } catch (e) { console.error(e); res.status(500).json({ error: "Internal Server Error" }); }
 });
 
+// 認証: create / update / delete（変更なし）
 app.post("/notes", requireAuth, async (req, res) => {
   try {
     const c = validateContent(req.body?.content);
     if (!c.ok) return res.status(400).json({ error: c.error });
-
     const t = validateTags(req.body?.tags);
     if (!t.ok) return res.status(400).json({ error: t.error });
 
@@ -433,10 +439,7 @@ app.post("/notes", requireAuth, async (req, res) => {
       returning id, content, tags, created_at, updated_at
     `;
     res.status(201).json(rows[0]);
-  } catch (e) {
-    console.error(e);
-    res.status(500).json({ error: "Internal Server Error" });
-  }
+  } catch (e) { console.error(e); res.status(500).json({ error: "Internal Server Error" }); }
 });
 
 app.patch("/notes/:id", requireAuth, async (req, res) => {
@@ -453,14 +456,12 @@ app.patch("/notes/:id", requireAuth, async (req, res) => {
       setParts.push(`content = $${values.length + 1}`);
       values.push(c.value);
     }
-
     if ("tags" in req.body) {
       const t = validateTags(req.body?.tags);
       if (!t.ok) return res.status(400).json({ error: t.error });
       setParts.push(`tags = $${values.length + 1}`);
       values.push(t.value);
     }
-
     if (setParts.length === 0) return res.status(400).json({ error: "nothing to update" });
 
     const query = `
@@ -472,10 +473,7 @@ app.patch("/notes/:id", requireAuth, async (req, res) => {
     const rows: any = await sql(query, [...values, id]);
     if (!rows || rows.length === 0) return res.status(404).json({ error: "not found" });
     res.json(rows[0]);
-  } catch (e) {
-    console.error(e);
-    res.status(500).json({ error: "Internal Server Error" });
-  }
+  } catch (e) { console.error(e); res.status(500).json({ error: "Internal Server Error" }); }
 });
 
 app.delete("/notes/:id", requireAuth, async (req, res) => {
