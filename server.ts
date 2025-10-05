@@ -1,4 +1,4 @@
-// server.ts（短いクエリは自動でしきい値オフ／CSVにも _rank / rank_min 反映・全文）
+// server.ts（短い語では _rank を出さない・UI注記用ヘッダ付き・CSVも同様）
 
 import express, { Request, Response, NextFunction } from "express";
 import cors from "cors";
@@ -113,7 +113,7 @@ function validateTags(raw: any) {
   return { ok: true as const, value: tags };
 }
 
-// ===== Query builders =====
+// ===== Notes filters from query =====
 function buildNotesFilters(req: Request) {
   const qRaw = typeof req.query.q === "string" ? req.query.q.trim() : "";
   const q = qRaw.length > 0 ? qRaw : "";
@@ -171,16 +171,20 @@ function validateFilterBody(raw: any) {
   const name = typeof raw.name === "string" ? raw.name.trim() : "";
   if (!name) return { ok:false as const, error:"name is required" };
   if (name.length > 64) return { ok:false as const, error:"name is too long (max 64)" };
+
   const q = typeof raw.q === "string" ? raw.q.trim() : undefined;
   const q_mode = raw.q_mode === "exact" ? "exact" : "partial";
+
   const tags_all = normalizeTags(raw.tags_all);
   const tags_any = normalizeTags(raw.tags_any);
   const tags_none = normalizeTags(raw.tags_none);
   const tags_match = raw.tags_match === "partial" ? "partial" : "exact";
+
   const from_at = typeof raw.from_at === "string" && !isNaN(new Date(raw.from_at).getTime())
     ? new Date(raw.from_at).toISOString() : undefined;
   const to_at = typeof raw.to_at === "string" && !isNaN(new Date(raw.to_at).getTime())
     ? new Date(raw.to_at).toISOString() : undefined;
+
   return { ok:true as const, value: { name, q, q_mode, tags_all, tags_any, tags_none, tags_match, from_at, to_at } };
 }
 function applyFilterRecord(
@@ -228,7 +232,7 @@ app.get("/_status", async (_req, res) => {
   } catch { res.status(500).json({ app: "ng" }); }
 });
 
-// ---- /notes: 検索 ----
+// ---- /notes: 検索（短い語は _rank 非表示 & threshold 自動OFF）----
 app.get("/notes", requireAuth, async (req, res) => {
   try {
     const orderBy = parseOrderBy(req.query.order_by);
@@ -254,9 +258,8 @@ app.get("/notes", requireAuth, async (req, res) => {
     const rawQ = typeof req.query.q === "string" ? req.query.q.trim() : "";
     const qModeParam = typeof req.query.q_mode === "string" && req.query.q_mode.toLowerCase() === "exact" ? "exact" : "partial";
     const useRelevance = !!rawQ && qModeParam === "partial";
-
-    // 2文字以下はしきい値を自動無効化
     const qChars = Array.from(rawQ).length;
+
     const applyThreshold = useRelevance && qChars >= 3;
     const rankMin = Number.isFinite(Number(req.query.rank_min)) ? Number(req.query.rank_min) : 0.20;
 
@@ -266,28 +269,14 @@ app.get("/notes", requireAuth, async (req, res) => {
       whereParts.push(`similarity(content, $${iQ}) >= $${iT}`);
     }
 
-    if (cursor && !req.query.offset) {
-      if (orderBy === "created_at") {
-        const cmp = order === "asc" ? ">" : "<";
-        const i1 = values.push(cursor.created_at);
-        const i2 = values.push(cursor.id);
-        whereParts.push(`(created_at, id) ${cmp} ($${i1}::timestamptz, $${i2}::int)`);
-      } else if (orderBy === "updated_at") {
-        const cmp = order === "asc" ? ">" : "<";
-        const i1 = values.push(cursor.created_at);
-        const i2 = values.push(cursor.id);
-        whereParts.push(`(updated_at, id) ${cmp} ($${i1}::timestamptz, $${i2}::int)`);
-      } else {
-        const cmp = order === "asc" ? ">" : "<";
-        const i = values.push(cursor.id);
-        whereParts.push(`id ${cmp} $${i}`);
-      }
-    }
-
     const whereClause = whereParts.length ? `where ${whereParts.join(" AND ")}` : "";
-    const selectRank = useRelevance ? `, similarity(content, $${values.push(rawQ)}) as _rank` : "";
+
+    // 短い語では _rank を出さない
+    const includeRank = useRelevance && qChars >= 3;
+    const selectRank = includeRank ? `, similarity(content, $${values.push(rawQ)}) as _rank` : "";
+
     const orderClause =
-      useRelevance && !req.query.order_by
+      includeRank && !req.query.order_by
         ? `order by _rank desc, id desc`
         : (orderBy === "created_at"
             ? `order by created_at ${order}, id ${order}`
@@ -305,6 +294,12 @@ app.get("/notes", requireAuth, async (req, res) => {
       ${orderClause}
       limit ${limitParam}${offsetSql}
     `, values);
+
+    // UI 注記用ヘッダ
+    if (!includeRank && useRelevance) {
+      res.setHeader("X-Rank-Disabled", "1");
+      res.setHeader("X-Rank-Reason", "short_query_len_lt_3");
+    }
 
     if (!req.query.offset && rows && rows.length === limit) {
       const last = rows[rows.length - 1];
@@ -324,7 +319,7 @@ app.get("/notes/count", requireAuth, async (req, res) => {
   } catch (e) { console.error(e); res.status(500).json({ error: "Internal Server Error" }); }
 });
 
-// ---- /notes/export.csv ----
+// ---- /notes/export.csv（短い語は _rank 列を出さない）----
 app.get("/notes/export.csv", requireAuth, async (req, res) => {
   try {
     const orderBy = parseOrderBy(req.query.order_by);
@@ -348,11 +343,10 @@ app.get("/notes/export.csv", requireAuth, async (req, res) => {
     const rawQ = typeof req.query.q === "string" ? req.query.q.trim() : "";
     const qModeParam = typeof req.query.q_mode === "string" && req.query.q_mode.toLowerCase() === "exact" ? "exact" : "partial";
     const useRelevance = !!rawQ && qModeParam === "partial";
-
     const qChars = Array.from(rawQ).length;
+
     const applyThreshold = useRelevance && qChars >= 3;
     const rankMin = Number.isFinite(Number(req.query.rank_min)) ? Number(req.query.rank_min) : 0.20;
-    const wantRank = String(req.query.rank || "").toLowerCase() === "1";
 
     if (applyThreshold) {
       const iQ = values.push(rawQ);
@@ -361,9 +355,14 @@ app.get("/notes/export.csv", requireAuth, async (req, res) => {
     }
 
     const whereClause = whereParts.length ? `where ${whereParts.join(" AND ")}` : "";
-    const selectRank = (useRelevance && wantRank) ? `, similarity(content, $${values.push(rawQ)}) as _rank` : "";
+
+    // rank=1 指定でも、短い語なら列は出さない
+    const wantRank = String(req.query.rank || "").toLowerCase() === "1";
+    const outputRank = wantRank && useRelevance && qChars >= 3;
+    const selectRank = outputRank ? `, similarity(content, $${values.push(rawQ)}) as _rank` : "";
+
     const orderClause =
-      (useRelevance && wantRank)
+      outputRank
         ? `order by _rank desc, id desc`
         : (orderBy === "created_at"
             ? `order by created_at ${order}, id ${order}`
@@ -385,7 +384,7 @@ app.get("/notes/export.csv", requireAuth, async (req, res) => {
       limit $${values.push(limit)}
     `, values);
 
-    const header = wantRank
+    const header = outputRank
       ? ["id", "content", "tags", "created_at_jst", "updated_at_jst", "_rank"]
       : ["id", "content", "tags", "created_at_jst", "updated_at_jst"];
 
@@ -395,7 +394,7 @@ app.get("/notes/export.csv", requireAuth, async (req, res) => {
     };
     const toCsvLine = (r: any) => {
       const base = [r.id, r.content, Array.isArray(r.tags) ? r.tags.join(",") : "", r.created_at_jst, r.updated_at_jst];
-      if (wantRank) base.push(r._rank ?? "");
+      if (outputRank) base.push(r._rank ?? "");
       return base.map(escape).join(",");
     };
 
@@ -403,6 +402,10 @@ app.get("/notes/export.csv", requireAuth, async (req, res) => {
     const csv = [header.join(","), ...(rows || []).map(toCsvLine)].join("\r\n");
     res.setHeader("Content-Type", "text/csv; charset=utf-8");
     res.setHeader("Content-Disposition", `attachment; filename="notes_export.csv"`);
+    if (!outputRank && useRelevance) {
+      res.setHeader("X-Rank-Disabled", "1");
+      res.setHeader("X-Rank-Reason", "short_query_len_lt_3");
+    }
     res.send(Buffer.concat([bom, Buffer.from(csv, "utf8")]));
   } catch (e) { console.error(e); res.status(500).json({ error: "Internal Server Error" }); }
 });
