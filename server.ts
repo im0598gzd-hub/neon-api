@@ -1,4 +1,4 @@
-// server.ts（notes も filters も全部入り・pg_trgm対応版）
+// server.ts（pg_trgm 関連度しきい値付き・全文）
 
 import express, { Request, Response, NextFunction } from "express";
 import cors from "cors";
@@ -267,7 +267,7 @@ app.get("/_status", async (_req, res) => {
   } catch { res.status(500).json({ app: "ng" }); }
 });
 
-// 認証: /notes 一覧（filter_idにも対応, pg_trgmの関連度順対応）
+// 認証: /notes 一覧（filter_id対応 + pg_trgm 関連度＆しきい値）
 app.get("/notes", requireAuth, async (req, res) => {
   try {
     const orderBy = parseOrderBy(req.query.order_by);
@@ -294,6 +294,21 @@ app.get("/notes", requireAuth, async (req, res) => {
       }
     }
 
+    // === pg_trgm 関連度＆しきい値 ===
+    const rawQ = typeof req.query.q === "string" ? req.query.q.trim() : "";
+    const qModeParam = typeof req.query.q_mode === "string" && req.query.q_mode.toLowerCase() === "exact" ? "exact" : "partial";
+    const useRelevance = !!rawQ && qModeParam === "partial";
+    const rankMin =
+      Number.isFinite(Number(req.query.rank_min)) ? Number(req.query.rank_min) : 0.20; // 既定 0.20
+
+    // しきい値 WHERE を追加（useRelevance のときだけ）
+    if (useRelevance) {
+      const iQ = values.push(rawQ);
+      const iT = values.push(rankMin);
+      whereParts.push(`similarity(content, $${iQ}) >= $${iT}`);
+    }
+
+    // カーソル
     if (cursor && !req.query.offset) {
       if (orderBy === "created_at") {
         const cmp = parseOrder(req.query.order) === "asc" ? ">" : "<";
@@ -314,11 +329,6 @@ app.get("/notes", requireAuth, async (req, res) => {
 
     const whereClause = whereParts.length ? `where ${whereParts.join(" AND ")}` : "";
 
-    // === ここから pg_trgm 関連度順の追加 ===
-    const rawQ = typeof req.query.q === "string" ? req.query.q.trim() : "";
-    const qModeParam = typeof req.query.q_mode === "string" && req.query.q_mode.toLowerCase() === "exact" ? "exact" : "partial";
-    const useRelevance = !!rawQ && qModeParam === "partial";
-
     // rank をSELECTに追加（useRelevance時のみ）
     const selectRank = useRelevance ? `, similarity(content, $${values.push(rawQ)}) as _rank` : "";
 
@@ -331,7 +341,6 @@ app.get("/notes", requireAuth, async (req, res) => {
             : orderBy === "updated_at"
               ? `order by updated_at ${order}, id ${order}`
               : `order by id ${order}`);
-    // === 追加ここまで ===
 
     const limitParam = `$${values.push(limit)}`;
     const offsetSql = cursor || offset === 0 ? "" : ` offset $${values.push(offset)}`;
