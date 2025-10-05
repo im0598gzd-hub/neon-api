@@ -1,4 +1,4 @@
-// server.ts（notes & filters & CSV / auth tolerant 版）
+// server.ts（Neon + Express / フィルタ & ページネーション & CSV & rank_min 対応）
 
 import express, { Request, Response, NextFunction } from "express";
 import cors from "cors";
@@ -6,9 +6,9 @@ import { neon } from "@neondatabase/serverless";
 
 const app = express();
 
-// ===== Runtime config =====
+/* ===== Runtime config ===== */
 const PORT = process.env.PORT || 3000;
-const API_KEY_ENV = process.env.API_KEY || ""; // ここは"Bearer ..."で保存されていてもOKにする
+const API_KEY = process.env.API_KEY || "";
 const DATABASE_URL = process.env.DATABASE_URL || "";
 
 if (!DATABASE_URL) {
@@ -17,7 +17,7 @@ if (!DATABASE_URL) {
 }
 const sql = neon(DATABASE_URL);
 
-// ===== Middlewares =====
+/* ===== Middlewares ===== */
 app.use(cors());
 app.use(express.json({ limit: "1mb" }));
 
@@ -32,66 +32,54 @@ app.use((req: Request, _res: Response, next: NextFunction) => {
   next();
 });
 
-// ===== Auth (Bearer) — tolerant =====
+// Auth (Bearer)
 function requireAuth(req: Request, res: Response, next: NextFunction) {
-  const rawAuth = req.header("authorization") || "";
-  const m = rawAuth.match(/^Bearer\s+(.+)$/i);
-  const sent = (m?.[1] ?? "").trim();
-
-  const envRaw = API_KEY_ENV.trim();
-  // Render 側に誤って "Bearer xxx" で保存されていても許容
-  const expected = envRaw.replace(/^Bearer\s+/i, "").trim();
-
-  if (!sent || !expected || sent !== expected) {
+  const h = req.header("authorization") || "";
+  const m = h.match(/^Bearer\s+(.+)$/i);
+  if (!m || m[1] !== API_KEY) {
     return res.status(401).json({ error: "Unauthorized" });
   }
   next();
 }
 
-// ===== Helpers =====
+/* ===== Helpers ===== */
+
 function normalizeTags(input: any): string[] {
   if (!Array.isArray(input)) return [];
   const cleaned = input
     .map((x) => (typeof x === "string" ? x.trim() : ""))
     .filter((x) => x.length > 0)
-    .map((x) =>
-      x.replace(/[\uFF01-\uFF5E]/g, (ch) => String.fromCharCode(ch.charCodeAt(0) - 0xFEE0))
-    )
+    // 全角英数→半角
+    .map((x) => x.replace(/[\uFF01-\uFF5E]/g, (ch) => String.fromCharCode(ch.charCodeAt(0) - 0xFEE0)))
+    // 英数のみは小文字化
     .map((x) => (/^[A-Za-z0-9]+$/.test(x) ? x.toLowerCase() : x));
   return Array.from(new Set(cleaned));
 }
+
 function parseTagsQuery(raw: any): string[] {
   if (typeof raw !== "string" || raw.trim() === "") return [];
   const arr = raw.split(",").map((s) => s.trim());
   return normalizeTags(arr);
 }
+
 function parseOrder(raw: any): "asc" | "desc" {
   const v = (typeof raw === "string" ? raw.toLowerCase() : "") as "asc" | "desc";
   return v === "asc" || v === "desc" ? v : "desc";
 }
+
 function parseOrderBy(raw: any): "id" | "created_at" | "updated_at" {
   const v = (typeof raw === "string" ? raw.toLowerCase() : "") as
     | "id" | "created_at" | "updated_at";
   return v === "created_at" || v === "updated_at" ? v : "id";
 }
+
 function parseIsoDate(raw: any): string | null {
   if (typeof raw !== "string" || raw.trim() === "") return null;
   const d = new Date(raw);
   if (isNaN(d.getTime())) return null;
   return d.toISOString();
 }
-function buildTagPartialCondition(
-  column: string, patterns: string[], mode: "all" | "any" | "none", values: any[]
-): string {
-  if (patterns.length === 0) return "";
-  const clauses = patterns.map((p) => {
-    const idx = values.push(`%${p}%`);
-    const ex = `EXISTS (SELECT 1 FROM unnest(${column}) t WHERE t ILIKE $${idx})`;
-    return mode === "none" ? `NOT ${ex}` : ex;
-  });
-  if (mode === "all" || mode === "none") return `(${clauses.join(" AND ")})`;
-  return `(${clauses.join(" OR ")})`;
-}
+
 function encodeCursor(created_at: string, id: number): string {
   return Buffer.from(`${created_at}|${id}`, "utf8").toString("base64url");
 }
@@ -105,10 +93,13 @@ function decodeCursor(raw: any): { created_at: string; id: number } | null {
     const d = new Date(c);
     if (isNaN(d.getTime())) return null;
     return { created_at: d.toISOString(), id };
-  } catch { return null; }
+  } catch {
+    return null;
+  }
 }
 
-// ===== Validation =====
+/* ===== Validation ===== */
+
 const MAX_CONTENT_LEN = 2000;
 const MAX_TAGS = 8;
 const MAX_TAG_LEN = 32;
@@ -142,23 +133,32 @@ function validateTags(raw: any) {
   return { ok: true as const, value: tags };
 }
 
-// ===== Notes filters from query =====
+/* ===== WHERE Builder ===== */
+
 function buildNotesFilters(req: Request) {
   const qRaw = typeof req.query.q === "string" ? req.query.q.trim() : "";
   const q = qRaw.length > 0 ? qRaw : "";
-  const qMode =
+  const qLen = q.length;
+
+  const q_mode =
     typeof req.query.q_mode === "string" && req.query.q_mode.toLowerCase() === "exact"
-      ? "exact" : "partial";
+      ? "exact"
+      : "partial";
+
   const tagsMatch =
     typeof req.query.tags_match === "string" && req.query.tags_match.toLowerCase() === "partial"
-      ? "partial" : "exact";
+      ? "partial"
+      : "exact";
   const tagsAll = parseTagsQuery(req.query.tags_all);
   const tagsAny = parseTagsQuery(req.query.tags_any);
   const tagsNone = parseTagsQuery(req.query.tags_none);
+
   const legacyTags = parseTagsQuery(req.query.tags);
   const legacyMode =
     typeof req.query.tags_mode === "string" && req.query.tags_mode.toLowerCase() === "any"
-      ? "any" : "all";
+      ? "any"
+      : "all";
+
   const fromIso = parseIsoDate(req.query.from);
   const toIso = parseIsoDate(req.query.to);
   if (fromIso && toIso && new Date(fromIso) > new Date(toIso)) {
@@ -169,250 +169,280 @@ function buildNotesFilters(req: Request) {
   const values: any[] = [];
 
   if (q) {
-    if (qMode === "exact") { const i = values.push(q); whereParts.push(`content = $${i}`); }
-    else { const i = values.push(`%${q}%`); whereParts.push(`content ILIKE $${i}`); }
+    if (q_mode === "exact") {
+      const i = values.push(q);
+      whereParts.push(`content = $${i}`);
+    } else {
+      const i = values.push(`%${q}%`);
+      whereParts.push(`content ILIKE $${i}`);
+    }
   }
+
+  // tags
   if (tagsAll.length + tagsAny.length + tagsNone.length > 0) {
     if (tagsMatch === "exact") {
-      if (tagsAll.length > 0) { const i = values.push(tagsAll); whereParts.push(`tags @> $${i}`); }
-      if (tagsAny.length > 0) { const i = values.push(tagsAny); whereParts.push(`tags && $${i}`); }
-      if (tagsNone.length > 0) { const i = values.push(tagsNone); whereParts.push(`NOT (tags && $${i})`); }
+      if (tagsAll.length > 0) {
+        const i = values.push(tagsAll);
+        whereParts.push(`tags @> $${i}`);
+      }
+      if (tagsAny.length > 0) {
+        const i = values.push(tagsAny);
+        whereParts.push(`tags && $${i}`);
+      }
+      if (tagsNone.length > 0) {
+        const i = values.push(tagsNone);
+        whereParts.push(`NOT (tags && $${i})`);
+      }
     } else {
-      if (tagsAll.length > 0) whereParts.push(buildTagPartialCondition("tags", tagsAll, "all", values));
-      if (tagsAny.length > 0) whereParts.push(buildTagPartialCondition("tags", tagsAny, "any", values));
-      if (tagsNone.length > 0) whereParts.push(buildTagPartialCondition("tags", tagsNone, "none", values));
+      // 部分一致（配列要素の部分一致）
+      const buildPartial = (patterns: string[], mode: "all" | "any" | "none") => {
+        if (patterns.length === 0) return "";
+        const clauses = patterns.map((p) => {
+          const idx = values.push(`%${p}%`);
+          const ex = `EXISTS (SELECT 1 FROM unnest(tags) t WHERE t ILIKE $${idx})`;
+          return mode === "none" ? `NOT ${ex}` : ex;
+        });
+        if (mode === "all" || mode === "none") return `(${clauses.join(" AND ")})`;
+        return `(${clauses.join(" OR ")})`;
+      };
+      if (tagsAll.length > 0) whereParts.push(buildPartial(tagsAll, "all"));
+      if (tagsAny.length > 0) whereParts.push(buildPartial(tagsAny, "any"));
+      if (tagsNone.length > 0) whereParts.push(buildPartial(tagsNone, "none"));
     }
   } else if (legacyTags.length > 0) {
     const i = values.push(legacyTags);
     whereParts.push(legacyMode === "any" ? `tags && $${i}` : `tags @> $${i}`);
   }
-  if (fromIso) { const i = values.push(fromIso); whereParts.push(`created_at >= $${i}`); }
-  if (toIso)   { const i = values.push(toIso);   whereParts.push(`created_at <= $${i}`); }
 
-  return { whereClause: whereParts.length ? `where ${whereParts.join(" AND ")}` : "", values } as const;
-}
-
-// ===== Filters helpers =====
-type FilterBody = {
-  name: string;
-  q?: string;
-  q_mode?: "exact" | "partial";
-  tags_all?: string[]; tags_any?: string[]; tags_none?: string[];
-  tags_match?: "exact" | "partial";
-  from_at?: string; to_at?: string;
-};
-function validateFilterBody(raw: any) {
-  if (typeof raw !== "object" || raw === null) return { ok:false as const, error:"invalid body" };
-  const name = typeof raw.name === "string" ? raw.name.trim() : "";
-  if (!name) return { ok:false as const, error:"name is required" };
-  if (name.length > 64) return { ok:false as const, error:"name is too long (max 64)" };
-
-  const q = typeof raw.q === "string" ? raw.q.trim() : undefined;
-  const q_mode = raw.q_mode === "exact" ? "exact" : "partial";
-
-  const tags_all = normalizeTags(raw.tags_all);
-  const tags_any = normalizeTags(raw.tags_any);
-  const tags_none = normalizeTags(raw.tags_none);
-  const tags_match = raw.tags_match === "partial" ? "partial" : "exact";
-
-  const from_at = typeof raw.from_at === "string" && !isNaN(new Date(raw.from_at).getTime())
-    ? new Date(raw.from_at).toISOString() : undefined;
-  const to_at = typeof raw.to_at === "string" && !isNaN(new Date(raw.to_at).getTime())
-    ? new Date(raw.to_at).toISOString() : undefined;
-
-  return { ok:true as const, value: { name, q, q_mode, tags_all, tags_any, tags_none, tags_match, from_at, to_at } };
-}
-function applyFilterRecord(
-  f: { q?:string|null; q_mode?: "exact"|"partial"|null;
-       tags_all?: string[]|null; tags_any?: string[]|null; tags_none?: string[]|null;
-       tags_match?: "exact"|"partial"|null; from_at?: string|null; to_at?: string|null; },
-  whereParts: string[], values: any[]
-) {
-  const q = (f.q ?? "").trim();
-  const qMode = f.q_mode === "exact" ? "exact" : "partial";
-  const tagsMatch = f.tags_match === "partial" ? "partial" : "exact";
-  const tagsAll = normalizeTags(f.tags_all ?? []);
-  const tagsAny = normalizeTags(f.tags_any ?? []);
-  const tagsNone = normalizeTags(f.tags_none ?? []);
-  const fromIso = f.from_at ? parseIsoDate(f.from_at) : null;
-  const toIso   = f.to_at   ? parseIsoDate(f.to_at)   : null;
-
-  if (q) {
-    if (qMode === "exact") { const i = values.push(q); whereParts.push(`content = $${i}`); }
-    else { const i = values.push(`%${q}%`); whereParts.push(`content ILIKE $${i}`); }
+  if (fromIso) {
+    const i = values.push(fromIso);
+    whereParts.push(`created_at >= $${i}`);
   }
-  if (tagsAll.length + tagsAny.length + tagsNone.length > 0) {
-    if (tagsMatch === "exact") {
-      if (tagsAll.length > 0) { const i = values.push(tagsAll); whereParts.push(`tags @> $${i}`); }
-      if (tagsAny.length > 0) { const i = values.push(tagsAny); whereParts.push(`tags && $${i}`); }
-      if (tagsNone.length > 0) { const i = values.push(tagsNone); whereParts.push(`NOT (tags && $${i})`); }
-    } else {
-      if (tagsAll.length > 0) whereParts.push(buildTagPartialCondition("tags", tagsAll, "all", values));
-      if (tagsAny.length > 0) whereParts.push(buildTagPartialCondition("tags", tagsAny, "any", values));
-      if (tagsNone.length > 0) whereParts.push(buildTagPartialCondition("tags", tagsNone, "none", values));
-    }
+  if (toIso) {
+    const i = values.push(toIso);
+    whereParts.push(`created_at <= $${i}`);
   }
-  if (fromIso) { const i = values.push(fromIso); whereParts.push(`created_at >= $${i}`); }
-  if (toIso)   { const i = values.push(toIso);   whereParts.push(`created_at <= $${i}`); }
+
+  const whereClause = whereParts.length ? `WHERE ${whereParts.join(" AND ")}` : "";
+
+  return { whereClause, values, q, qLen } as const;
 }
 
-// ===== Public routes =====
+/* ===== Public ===== */
+
 app.get("/health", (_req, res) => res.json({ ok: true }));
+
 app.get("/_status", async (_req, res) => {
   try {
     let db = "na";
-    try { const r: any = await sql`select 1 as ok`; db = r?.[0]?.ok === 1 ? "ok" : "ng"; }
-    catch { db = "ng"; }
+    try {
+      const r: any = await sql`select 1 as ok`;
+      db = r?.[0]?.ok === 1 ? "ok" : "ng";
+    } catch {
+      db = "ng";
+    }
     res.json({ app: "ok", db, now: new Date().toISOString() });
-  } catch { res.status(500).json({ app: "ng" }); }
+  } catch {
+    res.status(500).json({ app: "ng" });
+  }
 });
 
-// ---- Debug (必要な時だけ有効化) ----
-if ((process.env.DEBUG_AUTH || "").trim() === "1") {
-  app.get("/__debug_api_key", (_req, res) => {
-    const envRaw = (process.env.API_KEY || "");
-    res.json({
-      present: !!envRaw,
-      len: envRaw.length,
-      head: envRaw.slice(0,4),
-      tail: envRaw.slice(-4),
-      startsWithBearer: /^Bearer\s+/i.test(envRaw),
-    });
-  });
-}
+/* ===== Notes: list / count / export ===== */
 
-// 認証: /notes 一覧（filter_id対応）
+// GET /notes
 app.get("/notes", requireAuth, async (req, res) => {
   try {
     const orderBy = parseOrderBy(req.query.order_by);
     const order = parseOrder(req.query.order);
-    const limit = Math.min(100, Math.max(1, Number.isFinite(Number(req.query.limit)) ? Number(req.query.limit) : 50));
-    const offset = Number.isFinite(Number(req.query.offset)) && Number(req.query.offset) >= 0 ? Number(req.query.offset) : 0;
+    const limit = Math.min(
+      100,
+      Math.max(1, Number.isFinite(Number(req.query.limit)) ? Number(req.query.limit) : 50)
+    );
+    const offset = Number.isFinite(Number(req.query.offset)) && Number(req.query.offset) >= 0
+      ? Number(req.query.offset)
+      : 0;
     const cursor = decodeCursor(req.query.cursor);
+    const wantRank =
+      String(req.query.rank ?? "").toLowerCase() === "1" ||
+      String(req.query.rank ?? "").toLowerCase() === "true";
+    const rankMin = Number.isFinite(Number(req.query.rank_min)) ? Number(req.query.rank_min) : null;
 
+    // クエリからWHERE作成
     const built = buildNotesFilters(req);
     if ("error" in built) return res.status(400).json({ error: built.error });
+
     const whereParts: string[] = [];
     const values: any[] = [];
-    if (built.whereClause) { whereParts.push(built.whereClause.replace(/^where\s+/, "")); values.push(...built.values); }
 
-    const filterId = Number(req.query.filter_id);
-    if (Number.isInteger(filterId) && filterId > 0) {
-      const fr: any = await sql`select q, q_mode, tags_all, tags_any, tags_none, tags_match, from_at, to_at from filters where id = ${filterId}`;
-      if (fr && fr[0]) {
-        applyFilterRecord(fr[0], whereParts, values);
-      } else {
-        return res.status(404).json({ error: "filter not found" });
-      }
+    if (built.whereClause) {
+      whereParts.push(built.whereClause.replace(/^where\s+/i, ""));
+      values.push(...built.values);
     }
 
+    // rank（pg_trgm: similarity）: 3文字未満は無効化（ヘッダで通知）
+    const rankDisabled = built.qLen > 0 && built.qLen < 3;
+    if (rankDisabled) {
+      res.setHeader("X-Rank-Disabled", "1");
+    }
+
+    // rank_min フィルタ（有効時のみ）
+    if (!rankDisabled && built.q && rankMin !== null && !isNaN(rankMin)) {
+      const i = values.push(built.q);
+      const j = values.push(rankMin);
+      whereParts.push(`similarity(content, $${i}) >= $${j}`);
+    }
+
+    // cursor または offset
     if (cursor && !req.query.offset) {
+      const cmp = order === "asc" ? ">" : "<";
       if (orderBy === "created_at") {
-        const cmp = parseOrder(req.query.order) === "asc" ? ">" : "<";
         const i1 = values.push(cursor.created_at);
         const i2 = values.push(cursor.id);
         whereParts.push(`(created_at, id) ${cmp} ($${i1}::timestamptz, $${i2}::int)`);
       } else if (orderBy === "updated_at") {
-        const cmp = parseOrder(req.query.order) === "asc" ? ">" : "<";
-        const i1 = values.push(cursor.created_at);
+        const i1 = values.push(cursor.created_at); // for compatibility
         const i2 = values.push(cursor.id);
         whereParts.push(`(updated_at, id) ${cmp} ($${i1}::timestamptz, $${i2}::int)`);
       } else {
-        const cmp = parseOrder(req.query.order) === "asc" ? ">" : "<";
         const i = values.push(cursor.id);
         whereParts.push(`id ${cmp} $${i}`);
       }
     }
 
-    const whereClause = whereParts.length ? `where ${whereParts.join(" AND ")}` : "";
+    const whereClause = whereParts.length ? `WHERE ${whereParts.join(" AND ")}` : "";
     const orderClause =
-      orderBy === "created_at" ? `order by created_at ${order}, id ${order}` :
-      orderBy === "updated_at" ? `order by updated_at ${order}, id ${order}` :
-      `order by id ${order}`;
+      orderBy === "created_at"
+        ? `ORDER BY created_at ${order}, id ${order}`
+        : orderBy === "updated_at"
+        ? `ORDER BY updated_at ${order}, id ${order}`
+        : `ORDER BY id ${order}`;
+
+    // SELECT 列
+    const cols =
+      wantRank && !rankDisabled && built.q
+        ? `id, content, tags, created_at, updated_at, similarity(content, $${values.push(built.q)}) as _rank`
+        : `id, content, tags, created_at, updated_at`;
+
     const limitParam = `$${values.push(limit)}`;
     const offsetSql = cursor || offset === 0 ? "" : ` offset $${values.push(offset)}`;
 
-    const rows: any = await sql(`
-      select id, content, tags, created_at, updated_at
+    const rows: any = await sql(
+      `
+      select ${cols}
       from notes
       ${whereClause}
       ${orderClause}
       limit ${limitParam}${offsetSql}
-    `, values);
+    `,
+      values
+    );
 
+    // cursor next
     if (!req.query.offset && rows && rows.length === limit) {
       const last = rows[rows.length - 1];
       res.setHeader("X-Next-Cursor", encodeCursor(last.created_at, last.id));
     }
+
     res.json(rows);
-  } catch (e) { console.error(e); res.status(500).json({ error: "Internal Server Error" }); }
+  } catch (e) {
+    console.error(e);
+    res.status(500).json({ error: "Internal Server Error" });
+  }
 });
 
-// 認証: 件数
+// GET /notes/count
 app.get("/notes/count", requireAuth, async (req, res) => {
   try {
     const built = buildNotesFilters(req);
     if ("error" in built) return res.status(400).json({ error: built.error });
-    const r: any = await sql(`select count(*)::int as total from notes ${built.whereClause}`, built.values);
+
+    const r: any = await sql(
+      `select count(*)::int as total from notes ${built.whereClause}`,
+      built.values
+    );
     res.json({ total: r?.[0]?.total ?? 0 });
-  } catch (e) { console.error(e); res.status(500).json({ error: "Internal Server Error" }); }
+  } catch (e) {
+    console.error(e);
+    res.status(500).json({ error: "Internal Server Error" });
+  }
 });
 
-// 認証: CSV（JST・日時型・UTF-8+BOM）
+// GET /notes/export.csv  （UTF-8+BOM、JSTの日時、rank_min 反映）
 app.get("/notes/export.csv", requireAuth, async (req, res) => {
   try {
     const orderBy = parseOrderBy(req.query.order_by);
     const order = parseOrder(req.query.order);
-    const limit = Math.min(10000, Math.max(1, Number.isFinite(Number(req.query.limit)) ? Number(req.query.limit) : 1000));
+    const limit = Math.min(
+      10000,
+      Math.max(1, Number.isFinite(Number(req.query.limit)) ? Number(req.query.limit) : 1000)
+    );
 
     const built = buildNotesFilters(req);
     if ("error" in built) return res.status(400).json({ error: built.error });
 
+    const wantRank =
+      String(req.query.rank ?? "").toLowerCase() === "1" ||
+      String(req.query.rank ?? "").toLowerCase() === "true";
+    const rankMin = Number.isFinite(Number(req.query.rank_min)) ? Number(req.query.rank_min) : null;
+    const rankDisabled = built.qLen > 0 && built.qLen < 3;
+    if (rankDisabled) res.setHeader("X-Rank-Disabled", "1");
+
     const whereParts: string[] = [];
     const values: any[] = [];
-    if (built.whereClause) { whereParts.push(built.whereClause.replace(/^where\s+/, "")); values.push(...built.values); }
-    const filterId = Number(req.query.filter_id);
-    if (Number.isInteger(filterId) && filterId > 0) {
-      const fr: any = await sql`select q, q_mode, tags_all, tags_any, tags_none, tags_match, from_at, to_at from filters where id = ${filterId}`;
-      if (fr && fr[0]) {
-        applyFilterRecord(fr[0], whereParts, values);
-      } else {
-        return res.status(404).json({ error: "filter not found" });
-      }
+
+    if (built.whereClause) {
+      whereParts.push(built.whereClause.replace(/^where\s+/i, ""));
+      values.push(...built.values);
     }
-    const whereClause = whereParts.length ? `where ${whereParts.join(" AND ")}` : "";
+
+    if (!rankDisabled && built.q && rankMin !== null && !isNaN(rankMin)) {
+      const i = values.push(built.q);
+      const j = values.push(rankMin);
+      whereParts.push(`similarity(content, $${i}) >= $${j}`);
+    }
+
+    const whereClause = whereParts.length ? `WHERE ${whereParts.join(" AND ")}` : "";
 
     const orderClause =
-      orderBy === "created_at" ? `order by created_at ${order}, id ${order}` :
-      orderBy === "updated_at" ? `order by updated_at ${order}, id ${order}` :
-      `order by id ${order}`;
+      orderBy === "created_at"
+        ? `ORDER BY created_at ${order}, id ${order}`
+        : orderBy === "updated_at"
+        ? `ORDER BY updated_at ${order}, id ${order}`
+        : `ORDER BY id ${order}`;
 
-    const rows: any = await sql(`
-      select
-        id,
-        content,
-        tags,
-        to_char((created_at at time zone 'Asia/Tokyo'), 'YYYY/MM/DD HH24:MI:SS') as created_at_jst,
-        to_char((updated_at at time zone 'Asia/Tokyo'), 'YYYY/MM/DD HH24:MI:SS') as updated_at_jst
+    const colsBase = `
+      id,
+      content,
+      tags,
+      to_char((created_at at time zone 'Asia/Tokyo'), 'YYYY/MM/DD HH24:MI:SS') as created_at_jst,
+      to_char((updated_at at time zone 'Asia/Tokyo'), 'YYYY/MM/DD HH24:MI:SS') as updated_at_jst
+    `;
+
+    const cols =
+      wantRank && !rankDisabled && built.q
+        ? `${colsBase}, similarity(content, $${values.push(built.q)}) as _rank`
+        : colsBase;
+
+    const rows: any = await sql(
+      `
+      select ${cols}
       from notes
       ${whereClause}
       ${orderClause}
       limit $${values.push(limit)}
-    `, values);
+    `,
+      values
+    );
 
-    const header = ["id", "content", "tags", "created_at_jst", "updated_at_jst"];
+    const headerAlways = ["id", "content", "tags", "created_at_jst", "updated_at_jst"];
+    const header = wantRank && !rankDisabled && built.q ? [...headerAlways, "_rank"] : headerAlways;
+
     const escape = (s: any) => {
       const v = s === null || s === undefined ? "" : String(s);
       return `"${v.replace(/"/g, '""')}"`;
     };
     const toCsvLine = (r: any) =>
-      [
-        r.id,
-        r.content,
-        Array.isArray(r.tags) ? r.tags.join(",") : "",
-        r.created_at_jst,
-        r.updated_at_jst,
-      ].map(escape).join(",");
+      header.map((k) => escape(Array.isArray(r[k]) ? r[k].join(",") : r[k])).join(",");
 
     const bom = Buffer.from([0xef, 0xbb, 0xbf]);
     const csv = [header.join(","), ...(rows || []).map(toCsvLine)].join("\r\n");
@@ -420,10 +450,14 @@ app.get("/notes/export.csv", requireAuth, async (req, res) => {
     res.setHeader("Content-Type", "text/csv; charset=utf-8");
     res.setHeader("Content-Disposition", `attachment; filename="notes_export.csv"`);
     res.send(Buffer.concat([bom, Buffer.from(csv, "utf8")]));
-  } catch (e) { console.error(e); res.status(500).json({ error: "Internal Server Error" }); }
+  } catch (e) {
+    console.error(e);
+    res.status(500).json({ error: "Internal Server Error" });
+  }
 });
 
-// 認証: create
+/* ===== CRUD ===== */
+
 app.post("/notes", requireAuth, async (req, res) => {
   try {
     const c = validateContent(req.body?.content);
@@ -444,7 +478,6 @@ app.post("/notes", requireAuth, async (req, res) => {
   }
 });
 
-// 認証: update
 app.patch("/notes/:id", requireAuth, async (req, res) => {
   try {
     const id = Number(req.params.id);
@@ -459,14 +492,12 @@ app.patch("/notes/:id", requireAuth, async (req, res) => {
       setParts.push(`content = $${values.length + 1}`);
       values.push(c.value);
     }
-
     if ("tags" in req.body) {
       const t = validateTags(req.body?.tags);
       if (!t.ok) return res.status(400).json({ error: t.error });
       setParts.push(`tags = $${values.length + 1}`);
       values.push(t.value);
     }
-
     if (setParts.length === 0) return res.status(400).json({ error: "nothing to update" });
 
     const query = `
@@ -484,7 +515,6 @@ app.patch("/notes/:id", requireAuth, async (req, res) => {
   }
 });
 
-// 認証: delete
 app.delete("/notes/:id", requireAuth, async (req, res) => {
   try {
     const id = Number(req.params.id);
@@ -492,7 +522,13 @@ app.delete("/notes/:id", requireAuth, async (req, res) => {
     const rows: any = await sql`delete from notes where id = ${id} returning id`;
     if (!rows || rows.length === 0) return res.status(404).json({ error: "not found" });
     res.status(204).send();
-  } catch (e) { console.error(e); res.status(500).json({ error: "Internal Server Error" }); }
+  } catch (e) {
+    console.error(e);
+    res.status(500).json({ error: "Internal Server Error" });
+  }
 });
 
-app.listen(PORT, () => { console.log(`Server listening on :${PORT}`); });
+/* ===== Listen ===== */
+app.listen(PORT, () => {
+  console.log(`Server listening on :${PORT}`);
+});
