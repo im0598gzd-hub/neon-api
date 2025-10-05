@@ -1,4 +1,4 @@
-// server.ts（notes も filters も全部入り・完全版）
+// server.ts（notes も filters も全部入り・pg_trgm対応版）
 
 import express, { Request, Response, NextFunction } from "express";
 import cors from "cors";
@@ -267,7 +267,7 @@ app.get("/_status", async (_req, res) => {
   } catch { res.status(500).json({ app: "ng" }); }
 });
 
-// 認証: /notes 一覧（filter_idにも対応）
+// 認証: /notes 一覧（filter_idにも対応, pg_trgmの関連度順対応）
 app.get("/notes", requireAuth, async (req, res) => {
   try {
     const orderBy = parseOrderBy(req.query.order_by);
@@ -313,15 +313,31 @@ app.get("/notes", requireAuth, async (req, res) => {
     }
 
     const whereClause = whereParts.length ? `where ${whereParts.join(" AND ")}` : "";
+
+    // === ここから pg_trgm 関連度順の追加 ===
+    const rawQ = typeof req.query.q === "string" ? req.query.q.trim() : "";
+    const qModeParam = typeof req.query.q_mode === "string" && req.query.q_mode.toLowerCase() === "exact" ? "exact" : "partial";
+    const useRelevance = !!rawQ && qModeParam === "partial";
+
+    // rank をSELECTに追加（useRelevance時のみ）
+    const selectRank = useRelevance ? `, similarity(content, $${values.push(rawQ)}) as _rank` : "";
+
+    // 並び順：order_by が明示されていれば従来優先。なければ関連度優先。
     const orderClause =
-      orderBy === "created_at" ? `order by created_at ${order}, id ${order}` :
-      orderBy === "updated_at" ? `order by updated_at ${order}, id ${order}` :
-      `order by id ${order}`;
+      useRelevance && !req.query.order_by
+        ? `order by _rank desc, id desc`
+        : (orderBy === "created_at"
+            ? `order by created_at ${order}, id ${order}`
+            : orderBy === "updated_at"
+              ? `order by updated_at ${order}, id ${order}`
+              : `order by id ${order}`);
+    // === 追加ここまで ===
+
     const limitParam = `$${values.push(limit)}`;
     const offsetSql = cursor || offset === 0 ? "" : ` offset $${values.push(offset)}`;
 
     const rows: any = await sql(`
-      select id, content, tags, created_at, updated_at
+      select id, content, tags, created_at, updated_at${selectRank}
       from notes
       ${whereClause}
       ${orderClause}
