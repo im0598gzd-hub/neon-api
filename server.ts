@@ -1,4 +1,4 @@
-// server.ts（Neon + Express / フィルタ & ページネーション & CSV & rank_min 対応）
+// server.ts（Neon + Express / フィルタ & ページネーション & CSV & rank_min & trgm切替対応）
 
 import express, { Request, Response, NextFunction } from "express";
 import cors from "cors";
@@ -127,7 +127,7 @@ function validateTags(raw: any) {
   }
   for (const t of tags) {
     if (t.length > MAX_TAG_LEN) {
-      return { ok: false as const, error: `tag '${t.slice(0, 40)}' is too long (max ${MAX_TAG_LEN} chars)` };
+      return { ok: false as const, error: `tag '${t.slice(0, 40)}' is too long (max ${MAX_TAG_LEN})` };
     }
   }
   return { ok: true as const, value: tags };
@@ -140,10 +140,10 @@ function buildNotesFilters(req: Request) {
   const q = qRaw.length > 0 ? qRaw : "";
   const qLen = q.length;
 
-  const q_mode =
-    typeof req.query.q_mode === "string" && req.query.q_mode.toLowerCase() === "exact"
-      ? "exact"
-      : "partial";
+  // q_mode: exact / partial / trgm（未指定は partial）
+  const qm = typeof req.query.q_mode === "string" ? req.query.q_mode.toLowerCase() : "";
+  const q_mode: "exact" | "partial" | "trgm" =
+    qm === "exact" ? "exact" : qm === "trgm" ? "trgm" : "partial";
 
   const tagsMatch =
     typeof req.query.tags_match === "string" && req.query.tags_match.toLowerCase() === "partial"
@@ -172,6 +172,10 @@ function buildNotesFilters(req: Request) {
     if (q_mode === "exact") {
       const i = values.push(q);
       whereParts.push(`content = $${i}`);
+    } else if (q_mode === "trgm" && qLen >= 3) {
+      // pg_trgm を明示使用。短い語（<3）はILIKEにフォールバック
+      const i = values.push(q);
+      whereParts.push(`content % $${i}`);
     } else {
       const i = values.push(`%${q}%`);
       whereParts.push(`content ILIKE $${i}`);
