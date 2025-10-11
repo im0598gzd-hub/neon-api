@@ -4,105 +4,6 @@ info:
   version: '1.0.0'
 servers:
   - url: https://neon-api-3a0h.onrender.com
-paths:
-  /health:
-    get:
-      operationId: get_health
-      summary: Health check
-      responses:
-        '200':
-          description: OK
-
-  /notes:
-    get:
-      operationId: get_notes
-      summary: List notes
-      security:
-        - bearerAuth: []
-      responses:
-        '200':
-          description: OK
-          content:
-            application/json:
-              schema:
-                type: array
-                items:
-                  $ref: '#/components/schemas/Note'
-    post:
-      operationId: post_notes
-      summary: Create a note
-      security:
-        - bearerAuth: []
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema:
-              type: object
-              required:
-                - content
-              properties:
-                content:
-                  type: string
-                tags:
-                  type: array
-                  items:
-                    type: string
-      responses:
-        '200':
-          description: Created
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/Note'
-
-  /notes/{id}:
-    patch:
-      operationId: patch_notes_id
-      summary: Update a note
-      security:
-        - bearerAuth: []
-      parameters:
-        - name: id
-          in: path
-          required: true
-          schema:
-            type: integer
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema:
-              type: object
-              properties:
-                content:
-                  type: string
-                tags:
-                  type: array
-                  items:
-                    type: string
-      responses:
-        '200':
-          description: Updated
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/Note'
-
-    delete:
-      operationId: delete_notes_id
-      summary: Delete a note
-      security:
-        - bearerAuth: []
-      parameters:
-        - name: id
-          in: path
-          required: true
-          schema:
-            type: integer
-      responses:
-        '204':
-          description: Deleted
 
 components:
   securitySchemes:
@@ -115,20 +16,265 @@ components:
     Note:
       type: object
       properties:
-        id:
-          type: integer
-        content:
-          type: string
+        id: { type: integer }
+        content: { type: string }
         tags:
           type: array
-          items:
-            type: string
+          items: { type: string }
         created_at:
           type: string
           format: date-time
           description: UTCで保存（ChatGPT表示時にJSTへ変換）
         updated_at:
-          type: string
+          type: [string, "null"]
           format: date-time
-          nullable: true
           description: UTCで保存（ChatGPT表示時にJSTへ変換）
+        _rank:
+          type: number
+          description: pg_trgm similarity（`rank=1`時のみ出現）
+          example: 0.82
+      additionalProperties: false
+
+    ZeroResultMessage:
+      type: object
+      properties:
+        results:
+          type: array
+          items: {}
+          example: []
+        message:
+          type: string
+          example: 一致するノートは見つかりませんでした。
+        tips:
+          type: array
+          items: { type: string }
+          example:
+            - キーワードを短くする（例：「テスト」→「テス」）
+            - rank_min を下げて再検索（例：0.5 → 0.3）
+            - 別の表記・同義語を試す（例：表記ゆれ・カナ/漢字）
+        echo:
+          type: object
+          properties:
+            q: { type: [string, "null"] }
+            rank_min: { type: [number, "null"] }
+            limit: { type: integer }
+            order_by: { type: string }
+      required: [results, message]
+
+  parameters:
+    Q:
+      name: q
+      in: query
+      schema: { type: string }
+      description: 検索キーワード。`q_mode=trgm` で pg_trgm 使用（3文字未満は自動無効化）
+    QMode:
+      name: q_mode
+      in: query
+      schema:
+        type: string
+        enum: [exact, partial, trgm]
+        default: partial
+      description: exact=完全一致 / partial=部分一致(ILIKE) / trgm=pg_trgm
+    Rank:
+      name: rank
+      in: query
+      schema: { type: string, enum: ["0","1","false","true"], default: "0" }
+      description: 1/true で `_rank` を返す（3文字未満は自動無効化）
+    RankMin:
+      name: rank_min
+      in: query
+      schema: { type: number }
+      description: `_rank` の下限（rank=1 かつ trgm 有効時のみ適用）
+    LimitSmall:
+      name: limit
+      in: query
+      schema: { type: integer, minimum: 1, maximum: 100, default: 50 }
+    LimitCsv:
+      name: limit
+      in: query
+      schema: { type: integer, minimum: 1, maximum: 10000, default: 1000 }
+    Offset:
+      name: offset
+      in: query
+      schema: { type: integer, minimum: 0 }
+    Cursor:
+      name: cursor
+      in: query
+      schema: { type: string }
+      description: `X-Next-Cursor` で返るカーソル文字列
+    OrderBy:
+      name: order_by
+      in: query
+      schema:
+        type: string
+        enum: [id, created_at, updated_at]
+        default: id
+    Order:
+      name: order
+      in: query
+      schema:
+        type: string
+        enum: [asc, desc]
+        default: desc
+
+paths:
+  /health:
+    get:
+      operationId: get_health
+      summary: Health check
+      responses:
+        '200':
+          description: OK
+
+  /notes:
+    get:
+      operationId: get_notes
+      summary: List notes (自然言語検索 + rank, rank_min, trgm 切替)
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/Q'
+        - $ref: '#/components/parameters/QMode'
+        - $ref: '#/components/parameters/Rank'
+        - $ref: '#/components/parameters/RankMin'
+        - $ref: '#/components/parameters/LimitSmall'
+        - $ref: '#/components/parameters/Offset'
+        - $ref: '#/components/parameters/Cursor'
+        - $ref: '#/components/parameters/OrderBy'
+        - $ref: '#/components/parameters/Order'
+      responses:
+        '200':
+          description: 成功（ヒット時は Note[]、0件時はメッセージ形式）
+          headers:
+            X-Next-Cursor:
+              description: 満杯返却時の次ページ取得カーソル
+              schema: { type: string }
+            X-Rank-Disabled:
+              description: 3文字未満などでrankが無効化された場合に1
+              schema: { type: string, example: "1" }
+          content:
+            application/json:
+              oneOf:
+                - type: array
+                  items: { $ref: '#/components/schemas/Note' }
+                - $ref: '#/components/schemas/ZeroResultMessage'
+              examples:
+                hits:
+                  value:
+                    - id: 210
+                      content: これは全文検索テスト用のメモです
+                      tags: [demo]
+                      created_at: 2025-10-09T05:43:47.987Z
+                      updated_at: null
+                      _rank: 0.82
+                zero:
+                  value:
+                    results: []
+                    message: 一致するノートは見つかりませんでした。
+                    tips:
+                      - キーワードを短くする（例：「テスト」→「テス」）
+                      - rank_min を下げて再検索（例：0.5 → 0.3）
+                      - 別の表記・同義語を試す（例：表記ゆれ・カナ/漢字）
+                    echo:
+                      q: テスト
+                      rank_min: 0.5
+                      limit: 50
+                      order_by: rank_desc_id
+
+    post:
+      operationId: post_notes
+      summary: Create a note
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [content]
+              properties:
+                content: { type: string }
+                tags:
+                  type: array
+                  items: { type: string }
+      responses:
+        '200':
+          description: Created
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Note' }
+
+  /notes/{id}:
+    patch:
+      operationId: patch_notes_id
+      summary: Update a note
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: { type: integer }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                content: { type: string }
+                tags:
+                  type: array
+                  items: { type: string }
+      responses:
+        '200':
+          description: Updated
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Note' }
+
+    delete:
+      operationId: delete_notes_id
+      summary: Delete a note
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: { type: integer }
+      responses:
+        '204':
+          description: Deleted
+
+  /notes/export.csv:
+    get:
+      operationId: export_notes_csv
+      summary: CSV エクスポート（UTF-8+BOM / JST / rank_min 反映）
+      description: |
+        `rank=1` 指定時は `_rank` 列が追加されます。`X-Rank-Disabled: 1` の場合は `_rank` 列は出力されません。
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/Q'
+        - $ref: '#/components/parameters/Rank'
+        - $ref: '#/components/parameters/RankMin'
+        - $ref: '#/components/parameters/LimitCsv'
+      responses:
+        '200':
+          description: CSV bytes
+          headers:
+            X-Rank-Disabled:
+              description: 3文字未満などでrankが無効化された場合に1
+              schema: { type: string, example: "1" }
+          content:
+            text/csv:
+              schema:
+                type: string
+                format: binary
+              examples:
+                head:
+                  summary: ヘッダ例
+                  value: |
+                    id,content,tags,created_at_jst,updated_at_jst
