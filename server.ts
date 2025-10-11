@@ -274,6 +274,33 @@ function buildZeroResultTips(opts: {
   return Array.from(new Set(tips)).slice(0, 5);
 }
 
+/* ===== NEW: 0件時メッセージを自然文で整形（無料テンプレ） ===== */
+function formatFriendlyTips(message: string, tips: string[], echo: any) {
+  const q = (echo?.q ?? "").toString();
+  const hint =
+    tips.length > 0
+      ? "💡ヒント:\n" + tips.map((t) => `・${t}`).join("\n")
+      : "ヒントはありません。";
+
+  const tail = [
+    echo?.rank ? `rank=${echo.rank}` : null,
+    echo?.rank_min != null ? `rank_min=${echo.rank_min}` : null,
+    echo?.order_by ? `order_by=${echo.order_by}` : null,
+  ]
+    .filter(Boolean)
+    .join(", ");
+
+  const footer = tail ? `\n（検索条件: ${tail}）` : "";
+
+  return [
+    `🔍 検索ワード「${q}」では一致するノートが見つかりませんでした。`,
+    hint,
+    footer,
+  ]
+    .filter(Boolean)
+    .join("\n");
+}
+
 /* ===== Public ===== */
 
 app.get("/health", (_req, res) => res.json({ ok: true }));
@@ -385,7 +412,7 @@ app.get("/notes", requireAuth, async (req, res) => {
       values
     );
 
-    // 0件時：自然言語ヒントを返す
+    // 0件時：自然言語ヒントを返す（friendly_text を追加）
     if (!rows || rows.length === 0) {
       const tips = buildZeroResultTips({
         q: built.q,
@@ -403,7 +430,7 @@ app.get("/notes", requireAuth, async (req, res) => {
           ? `updated_at_${order}`
           : `id_${order}`;
 
-      return res.json({
+      const payload = {
         results: [],
         message: "一致するノートは見つかりませんでした。",
         tips,
@@ -413,6 +440,11 @@ app.get("/notes", requireAuth, async (req, res) => {
           limit,
           order_by,
         },
+      };
+
+      return res.json({
+        ...payload,
+        friendly_text: formatFriendlyTips(payload.message, payload.tips, payload.echo),
       });
     }
 
