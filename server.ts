@@ -1,5 +1,6 @@
 // server.ts（Neon + Express / フィルタ & ページネーション & CSV & rank_min & trgm切替対応）
-// 変更点：/notes に 0件時の自然言語応答を追加。rank使用時は ORDER BY _rank DESC, id を既定化。
+// 変更点：/notes に 0件時の自然言語応答を追加。rank使用時は ORDER BY _rank DESC, id。
+//        /notes/export.csv は Content-Type を text/csv に先行設定し、成功パスは send のみ使用。
 
 import express, { Request, Response, NextFunction } from "express";
 import cors from "cors";
@@ -29,7 +30,9 @@ app.use((req: Request, _res: Response, next: NextFunction) => {
     (req as any).body
       ? "yes"
       : "no";
-  console.log(`[${new Date().toISOString()}] ${req.method} ${req.path} body:${hasBody}`);
+  console.log(
+    `[${new Date().toISOString()}] ${req.method} ${req.path} body:${hasBody}`
+  );
   next();
 });
 
@@ -51,7 +54,12 @@ function normalizeTags(input: any): string[] {
     .map((x) => (typeof x === "string" ? x.trim() : ""))
     .filter((x) => x.length > 0)
     // 全角英数→半角
-    .map((x) => x.replace(/[\uFF01-\uFF5E]/g, (ch) => String.fromCharCode(ch.charCodeAt(0) - 0xFEE0)))
+    .map((x) =>
+      x.replace(
+        /[\uFF01-\uFF5E]/g,
+        (ch) => String.fromCharCode(ch.charCodeAt(0) - 0xfee0)
+      )
+    )
     // 英数のみは小文字化
     .map((x) => (/^[A-Za-z0-9]+$/.test(x) ? x.toLowerCase() : x));
   return Array.from(new Set(cleaned));
@@ -70,7 +78,9 @@ function parseOrder(raw: any): "asc" | "desc" {
 
 function parseOrderBy(raw: any): "id" | "created_at" | "updated_at" {
   const v = (typeof raw === "string" ? raw.toLowerCase() : "") as
-    | "id" | "created_at" | "updated_at";
+    | "id"
+    | "created_at"
+    | "updated_at";
   return v === "created_at" || v === "updated_at" ? v : "id";
 }
 
@@ -114,21 +124,30 @@ function validateContent(raw: any) {
     return { ok: false as const, error: "content is required (non-empty string)" };
   }
   if (v.length > MAX_CONTENT_LEN) {
-    return { ok: false as const, error: `content is too long (max ${MAX_CONTENT_LEN} chars)` };
+    return {
+      ok: false as const,
+      error: `content is too long (max ${MAX_CONTENT_LEN} chars)`,
+    };
   }
   return { ok: true as const, value: v };
 }
 function validateTags(raw: any) {
   const tags = normalizeTags(raw);
   if (tags.length === 0) {
-    return { ok: false as const, error: "tags must be a non-empty array of non-empty strings" };
+    return {
+      ok: false as const,
+      error: "tags must be a non-empty array of non-empty strings",
+    };
   }
   if (tags.length > MAX_TAGS) {
     return { ok: false as const, error: `too many tags (max ${MAX_TAGS})` };
   }
   for (const t of tags) {
     if (t.length > MAX_TAG_LEN) {
-      return { ok: false as const, error: `tag '${t.slice(0, 40)}' is too long (max ${MAX_TAG_LEN})` };
+      return {
+        ok: false as const,
+        error: `tag '${t.slice(0, 40)}' is too long (max ${MAX_TAG_LEN})`,
+      };
     }
   }
   return { ok: true as const, value: tags };
@@ -147,7 +166,8 @@ function buildNotesFilters(req: Request) {
     qm === "exact" ? "exact" : qm === "trgm" ? "trgm" : "partial";
 
   const tagsMatch =
-    typeof req.query.tags_match === "string" && req.query.tags_match.toLowerCase() === "partial"
+    typeof req.query.tags_match === "string" &&
+    req.query.tags_match.toLowerCase() === "partial"
       ? "partial"
       : "exact";
   const tagsAll = parseTagsQuery(req.query.tags_all);
@@ -156,7 +176,8 @@ function buildNotesFilters(req: Request) {
 
   const legacyTags = parseTagsQuery(req.query.tags);
   const legacyMode =
-    typeof req.query.tags_mode === "string" && req.query.tags_mode.toLowerCase() === "any"
+    typeof req.query.tags_mode === "string" &&
+    req.query.tags_mode.toLowerCase() === "any"
       ? "any"
       : "all";
 
@@ -263,14 +284,17 @@ app.get("/notes", requireAuth, async (req, res) => {
       100,
       Math.max(1, Number.isFinite(Number(req.query.limit)) ? Number(req.query.limit) : 50)
     );
-    const offset = Number.isFinite(Number(req.query.offset)) && Number(req.query.offset) >= 0
-      ? Number(req.query.offset)
-      : 0;
+    const offset =
+      Number.isFinite(Number(req.query.offset)) && Number(req.query.offset) >= 0
+        ? Number(req.query.offset)
+        : 0;
     const cursor = decodeCursor(req.query.cursor);
     const wantRank =
       String(req.query.rank ?? "").toLowerCase() === "1" ||
       String(req.query.rank ?? "").toLowerCase() === "true";
-    const rankMin = Number.isFinite(Number(req.query.rank_min)) ? Number(req.query.rank_min) : null;
+    const rankMin = Number.isFinite(Number(req.query.rank_min))
+      ? Number(req.query.rank_min)
+      : null;
 
     // クエリからWHERE作成
     const built = buildNotesFilters(req);
@@ -332,12 +356,11 @@ app.get("/notes", requireAuth, async (req, res) => {
     }
 
     // SELECT 列
-    const cols =
-      rankUsable
-        ? `id, content, tags, created_at, updated_at, similarity(content, $${values.push(
-            built.q
-          )}) as _rank`
-        : `id, content, tags, created_at, updated_at`;
+    const cols = rankUsable
+      ? `id, content, tags, created_at, updated_at, similarity(content, $${values.push(
+          built.q
+        )}) as _rank`
+      : `id, content, tags, created_at, updated_at`;
 
     const limitParam = `$${values.push(limit)}`;
     const offsetSql = cursor || offset === 0 ? "" : ` offset $${values.push(offset)}`;
@@ -367,14 +390,14 @@ app.get("/notes", requireAuth, async (req, res) => {
         tips: [
           "キーワードを短くする（例：「テスト」→「テス」）",
           "rank_min を下げて再検索（例：0.5 → 0.3）",
-          "別の表記・同義語を試す（例：表記ゆれ・カナ/漢字）"
+          "別の表記・同義語を試す（例：表記ゆれ・カナ/漢字）",
         ],
         echo: {
           q: built.q || null,
           rank_min: rankMin,
           limit,
-          order_by: rankUsable ? "rank_desc_id" : `${orderBy}_${order}`
-        }
+          order_by: rankUsable ? "rank_desc_id" : `${orderBy}_${order}`,
+        },
       });
     }
 
@@ -405,6 +428,10 @@ app.get("/notes/count", requireAuth, async (req, res) => {
 // GET /notes/export.csv  （UTF-8+BOM、JSTの日時、rank_min 反映）
 app.get("/notes/export.csv", requireAuth, async (req, res) => {
   try {
+    // 成功パスで JSON に化けないよう最初に明示
+    res.setHeader("Content-Type", "text/csv; charset=utf-8");
+    res.setHeader("Cache-Control", "no-store");
+
     const orderBy = parseOrderBy(req.query.order_by);
     const order = parseOrder(req.query.order);
     const limit = Math.min(
@@ -418,7 +445,9 @@ app.get("/notes/export.csv", requireAuth, async (req, res) => {
     const wantRank =
       String(req.query.rank ?? "").toLowerCase() === "1" ||
       String(req.query.rank ?? "").toLowerCase() === "true";
-    const rankMin = Number.isFinite(Number(req.query.rank_min)) ? Number(req.query.rank_min) : null;
+    const rankMin = Number.isFinite(Number(req.query.rank_min))
+      ? Number(req.query.rank_min)
+      : null;
     const rankDisabled = built.qLen > 0 && built.qLen < 3;
     if (rankDisabled) res.setHeader("X-Rank-Disabled", "1");
 
@@ -470,23 +499,29 @@ app.get("/notes/export.csv", requireAuth, async (req, res) => {
     );
 
     const headerAlways = ["id", "content", "tags", "created_at_jst", "updated_at_jst"];
-    const header = wantRank && !rankDisabled && built.q ? [...headerAlways, "_rank"] : headerAlways;
+    const header =
+      wantRank && !rankDisabled && built.q
+        ? [...headerAlways, "_rank"]
+        : headerAlways;
 
     const escape = (s: any) => {
       const v = s === null || s === undefined ? "" : String(s);
       return `"${v.replace(/"/g, '""')}"`;
     };
     const toCsvLine = (r: any) =>
-      header.map((k) => escape(Array.isArray(r[k]) ? r[k].join(",") : r[k])).join(",");
+      header
+        .map((k) => escape(Array.isArray(r[k]) ? r[k].join(",") : r[k]))
+        .join(",");
 
     const bom = Buffer.from([0xef, 0xbb, 0xbf]);
     const csv = [header.join(","), ...(rows || []).map(toCsvLine)].join("\r\n");
 
-    res.setHeader("Content-Type", "text/csv; charset=utf-8");
     res.setHeader("Content-Disposition", `attachment; filename="notes_export.csv"`);
-    res.send(Buffer.concat([bom, Buffer.from(csv, "utf8")]));
+    // 成功パスは send のみ（json禁止）
+    res.status(200).send(Buffer.concat([bom, Buffer.from(csv, "utf8")]));
   } catch (e) {
     console.error(e);
+    // エラー時は JSON でOK
     res.status(500).json({ error: "Internal Server Error" });
   }
 });
