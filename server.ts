@@ -1,4 +1,5 @@
 // server.ts（Neon + Express / フィルタ & ページネーション & CSV & rank_min & trgm切替対応）
+// 変更点：/notes に 0件時の自然言語応答を追加。rank使用時は ORDER BY _rank DESC, id を既定化。
 
 import express, { Request, Response, NextFunction } from "express";
 import cors from "cors";
@@ -314,17 +315,28 @@ app.get("/notes", requireAuth, async (req, res) => {
     }
 
     const whereClause = whereParts.length ? `WHERE ${whereParts.join(" AND ")}` : "";
-    const orderClause =
-      orderBy === "created_at"
-        ? `ORDER BY created_at ${order}, id ${order}`
-        : orderBy === "updated_at"
-        ? `ORDER BY updated_at ${order}, id ${order}`
-        : `ORDER BY id ${order}`;
+
+    // ▼ rankが使える状況では rank優先の安定ソート（_rank DESC, id）
+    //   それ以外は従来の order_by / order を適用
+    let orderClause: string;
+    const rankUsable = wantRank && !rankDisabled && !!built.q;
+    if (rankUsable) {
+      orderClause = `ORDER BY _rank DESC, id`;
+    } else {
+      orderClause =
+        orderBy === "created_at"
+          ? `ORDER BY created_at ${order}, id ${order}`
+          : orderBy === "updated_at"
+          ? `ORDER BY updated_at ${order}, id ${order}`
+          : `ORDER BY id ${order}`;
+    }
 
     // SELECT 列
     const cols =
-      wantRank && !rankDisabled && built.q
-        ? `id, content, tags, created_at, updated_at, similarity(content, $${values.push(built.q)}) as _rank`
+      rankUsable
+        ? `id, content, tags, created_at, updated_at, similarity(content, $${values.push(
+            built.q
+          )}) as _rank`
         : `id, content, tags, created_at, updated_at`;
 
     const limitParam = `$${values.push(limit)}`;
@@ -345,6 +357,25 @@ app.get("/notes", requireAuth, async (req, res) => {
     if (!req.query.offset && rows && rows.length === limit) {
       const last = rows[rows.length - 1];
       res.setHeader("X-Next-Cursor", encodeCursor(last.created_at, last.id));
+    }
+
+    // ✅ 0件時は自然言語メッセージで返却（HTTP 200）
+    if (!rows || rows.length === 0) {
+      return res.status(200).json({
+        results: [],
+        message: "一致するノートは見つかりませんでした。",
+        tips: [
+          "キーワードを短くする（例：「テスト」→「テス」）",
+          "rank_min を下げて再検索（例：0.5 → 0.3）",
+          "別の表記・同義語を試す（例：表記ゆれ・カナ/漢字）"
+        ],
+        echo: {
+          q: built.q || null,
+          rank_min: rankMin,
+          limit,
+          order_by: rankUsable ? "rank_desc_id" : `${orderBy}_${order}`
+        }
+      });
     }
 
     res.json(rows);
