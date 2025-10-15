@@ -9,9 +9,9 @@ services:
     branch: main
     rootDir: .
     autoDeploy: true
-    buildCommand: npm ci && npm run build
-    startCommand: npm start
+    buildCommand: npm install && npm run build
+    startCommand: npm run start
     healthCheckPath: /health
     pullRequestPreviewsEnabled: false
     envVars:
-      - fromGroup: neon-api-config   # さきほど作成した Environment Group を参照
+      - fromGroup: neon-api-config   # ← Environment Group 名に合わせて変更可能
