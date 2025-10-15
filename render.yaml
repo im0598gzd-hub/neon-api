@@ -1,0 +1,17 @@
+# Render Blueprint (neon-api) — vA4+
+services:
+  - type: web
+    name: neon-api
+    env: node
+    plan: free
+    region: oregon
+    repo: https://github.com/im0589gzd-hub/neon-api
+    branch: main
+    rootDir: .
+    autoDeploy: true
+    buildCommand: npm ci && npm run build
+    startCommand: npm start
+    healthCheckPath: /health
+    pullRequestPreviewsEnabled: false
+    envVars:
+      - fromGroup: neon-api-config   # さきほど作成した Environment Group を参照
