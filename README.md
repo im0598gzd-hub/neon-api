@@ -1,176 +1,194 @@
-### Auto Deploy Test
-# neon-api — 運用プロトコル（vA4+）
+neon-api — 運用プロトコル（vA4+）
 
-> 目的：このREADMEは、**復元力（RTO/RPO）**と**日次運用**を最小手数で回すための“真実のソース”です。実装と手順書を一体化し、事故後もこの1枚から復旧できます。
+目的：このREADMEは、復元力（RTO/RPO）と日次運用を最小手数で回すための“真実のソース”です。
+実装と手順書を一体化し、事故後もこの1枚から復旧できます。
 
----
+0. 要約（3行）
 
-## 0. 要約（3行）
+API：/health（公開）, /notes（CRUD, Bearer必須）, /export.csv（CSV）
 
-* **API**：`/health`（公開）, `/notes`（CRUD, Bearer必須）, `/export.csv`（CSV）
-* **中枢**：鍵運用／RTO-RPO／監視／CSV規約／変更管理（DoD）を本書で固定
-* **初動**：3分スモーク → 監視オン → 週次ドリル（復旧訓練）
+中枢：鍵運用／RTO-RPO／監視／CSV規約／変更管理（DoD）を本書で固定
 
----
+初動：3分スモーク → 監視オン → 週次ドリル（復旧訓練）
 
-## 1. 環境
+1. 環境構成
+項目	内容
+Runtime	Render（Node.js / TypeScript）
+DB	Neon（PostgreSQL, pg_trgm）
+ブランチ	main（本番）
+構成定義	render.yaml（※後続で実体化／IaC化）
+API仕様	openapi.yaml（OpenAPI 3.1, リポ直下に格納）
 
-* **Runtime**：Render（Node.js / TypeScript）
-* **DB**：Neon（PostgreSQL, pg_trgm）
-* **ブランチ**：`main`（本番）
-* **構成定義**：`render.yaml`（※後続で実体化／IaC化）
-* **API仕様**：`openapi.yaml`（OpenAPI 3.1, リポ直下に格納）
+将来：Neon BranchingでA/B検証（手順は #9 参照）
 
-> 将来：Neon BranchingでA/B検証（手順は#9参照）
+2. 鍵運用プロトコル（スコープ／発行・失効・ローテ）
+スコープ
 
----
+admin：全操作、運用者のみ
 
-## 2. 鍵運用プロトコル（Scopes / 発行・失効・ローテ）
+read：GET系（/notes参照, /export.csv ダウンロード）
 
-* **スコープ**：
+export：エクスポート専用（読み取り限定）
 
-  * `admin`：全操作、運用者のみ
-  * `read`：GET系（/notes参照, /export.csv ダウンロード）
-  * `export`：エクスポート専用（読み取り限定）
-* **保管**：ユーザ環境変数（OSユーザスコープ）＋ パスワードマネージャ
-* **発行**：Render ダッシュボード → Env に登録（READMEからリンク）
-* **失効**：漏洩・退職時は**即時失効**→Render再デプロイ
-* **ローテ**：**90日**ごと。重複期間を1日設け、切替確認後に旧鍵失効
-* **漏洩時の初動**：
+運用ルール
+区分	内容
+保管	OSユーザ環境変数＋パスワードマネージャ
+発行	Renderダッシュボード → Env登録（READMEからリンク）
+失効	漏洩・退職時は即時失効 → Render再デプロイ
+ローテ	90日ごと（重複期間1日）
+漏洩時の初動	①即時失効 → ②監査ログ確認（x-request-id） → ③API再デプロイ → ④READMEに記録
+3. RTO / RPO と復旧ドリル
+指標	値
+RTO	30分以内
+RPO	24時間以内
+週次ドリル（3分）
 
-  1. 鍵の即時失効 2) 監査ログ確認（`x-request-id`） 3) API再デプロイ 4) READMEに事後記録
+/export.csv を取得し日付付きで保存
 
----
+/health と /notes?limit=1 を確認
 
-## 3. RTO / RPO と復旧ドリル
+Render再起動 → 復帰時間を記録
 
-* **宣言**：RTO=**30分**／RPO=**24時間**
-* **週次ドリル（3分）**：
+事故時は #8（CSV）→ #9（Neonバックアップ）→ #10（Self Test） の順で復元。
 
-  1. `/export.csv` を取得し日付付で保存
-  2. `/health` と `/notes?limit=1` を確認
-  3. Render 再起動→復帰時間を記録
+4. 監視（/_status, Ping, アラート）
+項目	設定内容
+監視対象	/_status（200/NG判定）
+間隔	1時間ごと
+通知条件	連続2回NGで通知
+通知先	運用者メール／Discord（本READMEに記載）
+Cold start対策	1時間ごとに起床ping（無害GET）
 
-> 事故時は本章→#8（CSV）→#9（Neonバックアップ）→#10（Self Test）の順で復元。
+証跡：監視設定と最終テストのスクショを /docs/monitoring/ に保存。
 
----
+5. セキュリティ最小セット
+項目	実装内容
+Bearer比較	crypto.timingSafeEqual
+Rate Limit	express-rate-limit（IP単位60req/分）
+Helmet	helmet() デフォルト適用
+CORS	既知のOriginのみ許可
+要求ID	x-request-idを受理／生成しpinoログ出力
+Idempotency-Key（将来）	POST/PUT/PATCH重複防止用に実装予定
 
-## 4. 監視（/ _status, Ping, アラート）
+DoD：401／429／CORS拒否テスト結果を /docs/security/ に記録。
 
-* **監視対象**：`/_status`（200/NG判定）
-* **間隔**：**1時間**ごと。**連続2回NGで通知**
-* **通知先**：運用者メール/Discord（本READMEに宛先を書く）
-* **Cold start対策**：1h毎に**起床ping**（無害GET）
-* **READMEの証跡**：監視設定と最終到達テストのスクショを本リポ`/docs/monitoring/`に保存
+6. 検索・カーソル一貫性
 
----
+rank（類似度ソート）使用時はカーソル無効化
+→ X-Cursor-Disabled: 1 を返却しUIも無効化
 
-## 5. セキュリティ最小セット（High→Low）
+order_by=updated_at のカーソルは (updated_at, id) 複合キーで安定化
 
-* **Bearer比較の耐タイミング化**：`crypto.timingSafeEqual`
-* **Rate Limit**：`express-rate-limit`（例：IPごと 60req/分）
-* **Helmet**：`helmet()` デフォルト
-* **CORSホワイト**：既知のフロントOriginのみ許可
-* **要求ID**：`x-request-id` を受理/生成しログ（`pino`）へ
-* **Idempotency-Key**（将来）：POST/PUT/PATCHの重複防止
+将来：X-Rank-Disabled 等ヘッダ追加予定
 
-> DoD：401動作／429動作／CORS拒否の**手動テスト**記録を`/docs/security/`に残す。
+7. 変更管理（DoD / OpenAPI差分ガード）
+DoD（Definition of Done）
 
----
+README更新（該当章追記）
 
-## 6. 検索・カーソルの一貫性
+OpenAPI更新
 
-* **rank（類似度ソート）使用時はカーソル無効**：
+手動テスト結果を /docs/changes/ に保存
 
-  * `rank=true` のレスポンスに `X-Cursor-Disabled: 1`
-  * UIへも同ヘッダを伝播し、ページングUIを抑止
-* **`order_by=updated_at` のカーソル**：安定のため **(updated_at, id)** の複合キーでページング
-* **付記**：`X-Rank-Disabled` 等の明示ヘッダは将来追加
+セマンティックバージョニング採用
 
----
+差分ガード
 
-## 7. 変更管理（DoD / OpenAPI差分ガード）
+CIで openapi-diff を実行し、破壊的変更があればビルド失敗。
+（導入は後続タスク）
 
-* **DoD（Definition of Done）**：
+8. CSVエクスポート規約
+項目	規約内容
+ファイル名	notes_YYYYMMDD.csv
+文字コード	UTF-8（BOM付き）
+改行	CRLF（Windows/Excel互換）
+列順	固定。列追加は末尾のみ
+Excel対策	長数値には先頭 ' を付加
 
-  1. README更新（該当章の追記）  2) OpenAPI更新  3) 手動テスト結果を`/docs/changes/`に保存  4) セマンティックバージョニング
-* **OpenAPI差分ガード**：CIで `openapi-diff` を走らせ**破壊的変更で失敗**（※導入は後続タスク）
+規約変更時はメジャーバージョン更新扱い。
 
----
-
-## 8. CSVエクスポート規約（互換性固定）
-
-* **Content-Disposition**：`attachment; filename="notes_YYYYMMDD.csv"`
-* **文字コード**：UTF-8 **BOM付き**
-* **改行**：**CRLF**（Windows/Excel互換）
-* **列順**：固定。将来列追加時は**末尾追加のみ**
-* **Excel注意**：長い数値は先頭`'`で桁落ち防止（必要時）
-* **README注記**：仕様を変える場合は**メジャー更新**扱い
-
----
-
-## 9. データベース運用（Neon）
-
-* **BranchingでA/B**：`main`から一時ブランチ→テスト→マージ/破棄
-* **Backups履歴**：PITR/スナップショットの一覧を**月1で確認**し`/docs/db/`へ記録（スクショorSQL）
-* **削除設計（将来）**：`deleted_at` でソフトデリート→`/restore` API
-
----
-
-## 10. 3分スモークテスト
-
-```bash
-# 1) 健康確認
+9. データベース運用（Neon）
+項目	内容
+Branching	main → 一時ブランチ → テスト → マージ／破棄
+Backups	月1確認 → /docs/db/ に記録（スクショ or SQL）
+削除設計（将来）	deleted_at によるソフトデリート → /restore API予定
+10. 3分スモークテスト
+# 1. 健康確認
 curl -sS https://<your-host>/health | jq .
 
-# 2) 最小データ確認
+# 2. 最小データ確認
 curl -sS -H "Authorization: Bearer <READ_KEY>" \
   "https://<your-host>/notes?limit=1"
 
-# 3) CSVダウンロード（BOM/CRLF/ファイル名を確認）
+# 3. CSVダウンロード
 curl -sS -H "Authorization: Bearer <EXPORT_KEY>" \
   -o notes_$(date +%Y%m%d).csv \
   "https://<your-host>/export.csv"
-```
 
----
+11. Self Test（notes-selftest.ps1）
 
-## 11. Self Test（`notes-selftest.ps1` 概要）
+3手で診断：/_status → /notes?limit=1 → /export.csv
 
-* **3手でOK/ERRORを出力**：`/_status` → `/notes?limit=1` → `export.csv`
-* **結果**：`[OK]` か `[ERROR:<phase>]` を標準出力
-* **README**：使い方とサンプル出力を本章に追記（ツールは`/tools/`配下）
+出力：[OK] または [ERROR:<phase>]
 
----
+配置：ツールは /tools/ 配下
 
-## 12. リリース手順（最小）
+README：使い方とサンプル出力を本章に追記予定
 
-1. 変更をコミット（README, openapi.yaml, server.ts など）
-2. `render.yaml` で**環境差**を吸収 → デプロイ
-3. 3分スモーク（#10）→ 監視で到達確認（#4）
+12. リリース手順（最小構成）
 
----
+README / OpenAPI / Server を更新
 
-## 13. 付録リンク（本リポ内）
+render.yaml で環境差を吸収 → デプロイ
 
-* **付録A**：OpenAPI全文 → `openapi.yaml`
-* **付録F**：`render.yaml` テンプレ（IaC）
-* **付録I**：`timingSafeEqual` 最小パッチ例
-* **付録J**：3分スモークの詳細手順
-* **付録K**：技術設計の懸念・改善余地
-* **付録L**：所見／意思決定ログ（短評）
+3分スモーク（#10）→ 監視確認（#4）
 
----
+13. 付録リンク（リポジトリ内）
+付録	内容
+A	OpenAPI全文 → openapi.yaml
+F	render.yaml テンプレ（IaC）
+I	timingSafeEqual パッチ例
+J	3分スモーク詳細手順
+K	技術設計の懸念・改善余地
+L	所見／意思決定ログ（短評）
+14. DoD（README完了条件）
 
-## 14. DoD（このREADME自体の完了条件）
+ リポ直下に配置し、Renderからリンク済
 
-* [ ] リポ直下に配置し、**Renderダッシュボードからリンク**
-* [ ] 監視タスクの到達テストスクショを `/docs/monitoring/` に保存
-* [ ] 3分スモークの最新実行ログ（日時・要約）を `/docs/runbooks/` に保存
-* [ ] 本章のチェック項目に**日付**を記入
+ 監視テストスクショを /docs/monitoring/ に保存
 
----
+ 最新スモークログを /docs/runbooks/ に保存
 
-### 更新履歴
+ 実施日を本章に記入
 
-* 2025-10-15 vA4+ 初版（運用プロトコル定着／短時間復旧を最優先）
+15. README更新ルール（2025-10-16追記）
+区分	指針
+原文維持	原文は改変せず、差分を追記で管理する
+追記優先	日次更新・小改修は追記方式で行う
+改版基準	章構成や思想が変わる場合のみ版番号を更新（例：vA5）
+履歴管理	変更は「更新履歴」に必ず日付＋概要を記載
+Render検証	README更新＝軽デプロイ検証の役割も兼ねる
+
+追記時は、末尾に新章を追加して原文整合を保つこと。
+再構成は設計思想が変わる場合のみに限定する。
+
+16. 本日の作業履歴（2025-10-16）
+時刻(JST)	作業内容	結果
+13:00	GitHub README 最終整形・Render反映確認	✅ 成功
+13:40	lockファイル生成・コミット	✅ 成功
+14:00	Render再デプロイ（npm install運用）	✅ 稼働中（/health OK）
+14:40	Blueprint試行（UI非対応）	⚠ 実行不可（UI更新による非表示）
+15:20	IaC運用方針：手動安定版に確定	✅ 確立
+15:50	常駐ルールを3本柱に再固定	✅ 完了
+16:30	README更新方針（追記型）決定	✅ 確定
+
+本日は、Render自動反映・安定稼働・追記運用ルール確立まで完了。
+残タスクは「Blueprint UI再登場時のIaC再適用」のみ。
+
+更新履歴
+日付	内容
+2025-10-15 vA4+	初版（運用プロトコル定着／短時間復旧最優先）
+2025-10-16	追記：README更新ルール＋本日の作業履歴追加（vA4+維持）
+
+✅ 完全統合版（vA4+追記済）
+原文保持／全履歴連動／Render再適用可。
