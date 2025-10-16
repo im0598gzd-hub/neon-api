@@ -421,3 +421,37 @@ time, level, id(request-id), method, url, statusCode, responseTime, remoteAddr
 - ESM最適化は **vA6** 移行時の `import` 文統一に備えるための暫定措置。  
 
 ---
+---
+
+### 付録F：render.yaml 差分（vA4→vA5）
+
+> 目的：Render 自動デプロイ構成の改訂点を明示し、復旧時に1クリック再構築を可能にする。  
+> 適用範囲：`Blueprint UI再登録 → API再デプロイ → /health 確認` の全行程。
+
+#### 1. 差分サマリ
+| 区分 | 項目 | vA4 | vA5 | 備考 |
+|------|------|-----|-----|------|
+| 更新 | `type` | web | web | 不変（Express固定） |
+| 維持 | `runtime` | node | node | Node 18固定 |
+| 更新 | `envVars` | 手動登録 | 自動登録 (Render UI同期) | RTO短縮（30分以内） |
+| 追加 | `autoDeploy` | false | true | mainブランチpushで自動反映 |
+| 追加 | `buildCommand` | — | `npm ci && npm run build` | lock整合性保持 |
+| 更新 | `startCommand` | `node server.js` | `node dist/server.js` | tsビルド後の本番用 |
+| 維持 | `branch` | main | main | 不変 |
+| 追加 | `healthCheckPath` | — | `/health` | 稼働確認用 |
+| 維持 | `plan` | free | free | Render無料枠運用維持 |
+| 追加 | `envVarsFromFile` | — | `.env` | ローカル→Render間の自動反映 |
+
+#### 2. 自動化仕様
+- `Render.yaml` により、**デプロイ構成のIaC化（Infrastructure as Code）**を実現。  
+- `autoDeploy: true` により、GitHubコミット直後に自動ビルド・再起動を実行。  
+- 失敗時は `/health` のHTTP 200応答で再稼働可否を確認（5分周期の監視対象）。  
+- `.env` の同期をRender Dashboard上の `Environment > Sync` に統合。  
+
+#### 3. 運用上の注意点
+- **無料プランでは同時ビルドが1件まで**。並列デプロイを避ける。  
+- `.env` 内のAPIキーはRender側で暗号化され、再参照不可（再入力で更新）。  
+- デプロイの最終確認は `Deploy logs → Finished successfully` を必ず確認。  
+- 手動再起動は `Render Dashboard > Manual Deploy` で実行可。  
+
+---
