@@ -135,3 +135,86 @@ API：/health（公開）, /notes（CRUD, Bearer必須）, /export.csv（CSV）
 
 ---
 
+---
+
+### 付録A：OpenAPI 3.1 修正版（全文・貼り替え可）
+
+（Actions Builder のスキーマ欄にそのまま貼付 → 保存 → 右上「更新する」）
+
+```yaml
+openapi: 3.1.0
+info:
+  title: Neon Notes API
+  version: '1.0.1'
+
+servers:
+  - url: https://neon-api-3a0h.onrender.com
+
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: API_KEY
+
+  schemas:
+    Note:
+      type: object
+      additionalProperties: false
+      properties:
+        id: { type: integer }
+        content: { type: string }
+        tags:
+          type: array
+          items: { type: string }
+        created_at:
+          type: string
+          format: date-time
+          description: UTCで保存（表示はJSTに変換されることがあります）
+        updated_at:
+          type: [string, 'null']
+          format: date-time
+          description: UTCで保存（表示はJSTに変換されることがあります）
+        _rank:
+          type: number
+          description: pg_trgm similarity（`rank=1`時のみ出現）
+
+paths:
+  /health:
+    get:
+      summary: 健康状態確認
+      responses:
+        '200':
+          description: OK
+  /notes:
+    get:
+      summary: ノート一覧取得
+      parameters:
+        - name: q
+          in: query
+          description: 検索クエリ
+          schema: { type: string }
+        - name: rank
+          in: query
+          description: 類似度検索（true/false）
+          schema: { type: boolean }
+        - name: limit
+          in: query
+          description: 最大取得件数
+          schema: { type: integer, default: 20 }
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: '#/components/schemas/Note' }
+  /export.csv:
+    get:
+      summary: CSVエクスポート
+      security:
+        - bearerAuth: []
+      responses:
+        '200':
+          description: CSVファイルを返す
