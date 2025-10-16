@@ -552,11 +552,43 @@ yaml
   1. PowerShellで手動実行し、ステータス200を確認  
   2. `C:\logs\neon_api_monitor.log` に出力が追加されること  
   3. Render側で再デプロイが記録されていること（Deploy Logs）
+---
+
+### 付録I：最小パッチ例（カーソル／認証の堅牢化）
+
+1) rankソート時はカーソル無効化（X-Next-Cursorを返さない）  
+- GET /notes の orderClause が rank を選んだ場合は、「cursor/offsetのうち cursor は受理しない＆返さない」に変更。  
+  （rank はクエリ依存スコアで安定キーでないため）
+
+2) order_by=updated_at のときのカーソル  
+- 生成も比較も `(updated_at, id)` を使う。  
+  例：  
+  ```sql
+  WHERE (updated_at, id) < ($updated_at_cursor, $id_cursor)  -- 降順の場合
+Bearer 比較のタイミング安全
+
+typescript
+コードをコピーする
+import crypto from "node:crypto";
+
+function requireAuth(req: Request, res: Response, next: NextFunction) {
+  const h = req.header("authorization") || "";
+  const m = h.match(/^Bearer\s+(.+)$/i);
+  const provided = m?.[1] ?? "";
+  const expected = API_KEY || "";
+  if (!expected || provided.length !== expected.length)
+    return res.status(401).json({ error: "Unauthorized" });
+  const ok = crypto.timingSafeEqual(Buffer.from(provided), Buffer.from(expected));
+  if (!ok) return res.status(401).json({ error: "Unauthorized" });
+  next();
+}
+yaml
+コードをコピーする
 
 ---
 ---
 
-### 付録I：Neon接続トラブル時の手動復旧チェックリスト
+### 付録L：Neon接続トラブル時の手動復旧チェックリスト
 
 > 目的：Render・Neon・GitHub の自動再構築ルートが失敗した場合に、  
 > 管理者が3分以内にAPIを復旧させるための最小手順を明文化する。
