@@ -1,3 +1,8 @@
+<!--
+README_vA5.md
+作成日: 2025-10-17 JST
+目的: README vA4+ と原本 vA4 Neon.docx の完全統合版（付録A〜L再収録ベース）
+-->
 # neon-api — 運用プロトコル（vA5・完全統合版）
 
 本書は README vA4+（2025-10-16）を基礎とし、  
