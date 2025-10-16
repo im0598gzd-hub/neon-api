@@ -554,3 +554,89 @@ yaml
   3. Render側で再デプロイが記録されていること（Deploy Logs）
 
 ---
+---
+
+### 付録I：Neon接続トラブル時の手動復旧チェックリスト
+
+> 目的：Render・Neon・GitHub の自動再構築ルートが失敗した場合に、  
+> 管理者が3分以内にAPIを復旧させるための最小手順を明文化する。
+
+---
+
+#### 🧭 手順概要（全体像）
+
+| フェーズ | 目的 | 実行者 | 所要時間 | 判定基準 |
+|-----------|------|----------|------------|------------|
+| ① 確認 | 接続障害の有無を特定 | 管理者 | 30秒 | NeonまたはRenderの応答が途絶 |
+| ② 判定 | 原因を「Neon」「Render」「ネットワーク」に分類 | 管理者 | 30秒 | Ping, Render Status, Neon Dashboard |
+| ③ 対応 | 障害箇所を手動復旧（手順表参照） | 管理者 | 90秒 | /healthが200を返すこと |
+| ④ 検証 | `/export.csv` 正常動作の確認 | 管理者 | 30秒 | CSVファイルがダウンロード可 |
+| ⑤ 記録 | ログ追記およびGitHubコミット | 管理者 | 30秒 | README_vA5.md「フェーズ」更新 |
+
+---
+
+#### ⚙️ 詳細手順
+
+##### フェーズ①：障害確認
+1. ブラウザで `https://neon-api-3a0h.onrender.com/health` を開く。  
+2. 応答コードを確認：  
+   - ✅ 200 → 問題なし  
+   - ❌ 404 / 502 / Timeout → 次フェーズへ  
+
+##### フェーズ②：原因判定
+| 想定区分 | 確認項目 | 確認方法 |
+|-----------|------------|------------|
+| Neon障害 | Neon DashboardでDB接続状況を確認 | https://neon.tech/dashboard |
+| Render障害 | Render Statusページで稼働状況を確認 | https://status.render.com |
+| 通信障害 | `ping neon.tech` / `ping render.com` | CMDまたはPowerShell |
+
+結果に応じて下記の対応フェーズへ。
+
+---
+
+##### フェーズ③：手動復旧
+
+| 対象 | 手順 | 期待結果 |
+|--------|------|------------|
+| Neon DB再起動 | Neon Dashboard → Project → Branch → **Restart Compute** | DB応答が再開 |
+| Render再デプロイ | Render Dashboard → Web Service → **Manual Deploy** | “Deploy logs: Finished successfully” |
+| GitHubリポ再Push | `git add . && git commit -m "manual redeploy" && git push` | Renderが自動再ビルド |
+| PowerShell再実行 | `C:\scripts\health_check.ps1` を右クリック → 実行 | ログ `[OK] phase:health` 出力 |
+
+---
+
+##### フェーズ④：検証
+
+1. `/export.csv` にアクセス。  
+   - ✅ CSVダウンロード成功 → OK  
+   - ❌ エラー → Render再デプロイを再試行。  
+2. ローカルに `C:\backup\notes_YYYYMMDD.csv` が生成されることを確認。
+
+---
+
+##### フェーズ⑤：記録
+
+| 項目 | 内容 |
+|------|------|
+| 更新対象 | `README_vA5.md` の「フェーズ:」欄 |
+| 記載形式 | `[OK] manual recovery @YYYY-MM-DD HH:mm JST` |
+| コミット | `git add README_vA5.md && git commit -m "manual recovery log" && git push` |
+| 併記 | `C:\logs\neon_api_monitor.log` に `[OK] phase:manual` を追記 |
+
+---
+
+#### 🔐 注意事項
+- PowerShellスクリプトは**管理者権限で実行必須**。  
+- Render APIキーは `.env` に保持（漏洩厳禁）。  
+- 復旧不能時は「Render Logs」と「Neon Support」に報告。  
+- 復旧後、週次ドリル（付録G）を**直後に手動実行**して正常化を確認。
+
+---
+
+#### 📜 運用メモ（推奨）
+- RTO目標：3分以内  
+- RPO目標：直前CSV（24時間以内）まで復旧可能  
+- 緊急連絡：Slack #infra-alert または電話連絡体制（別紙参照）  
+- 次期課題（vA6）：自動通知（LINE Notify / Discord Webhook）追加予定。
+
+---
