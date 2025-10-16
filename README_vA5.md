@@ -554,18 +554,44 @@ yaml
   3. Render側で再デプロイが記録されていること（Deploy Logs）
 ---
 
+---
+
 ### 付録I：最小パッチ例（カーソル／認証の堅牢化）
 
-1) rankソート時はカーソル無効化（X-Next-Cursorを返さない）  
-- GET /notes の orderClause が rank を選んだ場合は、「cursor/offsetのうち cursor は受理しない＆返さない」に変更。  
-  （rank はクエリ依存スコアで安定キーでないため）
+#### 1. 概要（目的）
+「最小の改修で可用性を最大化する」思想に基づくパッチ例。  
+対象は `/notes` の**カーソル制御**と**Bearer認証**。  
+安定しない要素（rankスコア等）への依存を断ち、**安定キー**と**タイミング安全**で土台を固める。
 
-2) order_by=updated_at のときのカーソル  
-- 生成も比較も `(updated_at, id)` を使う。  
-  例：  
-  ```sql
-  WHERE (updated_at, id) < ($updated_at_cursor, $id_cursor)  -- 降順の場合
-Bearer 比較のタイミング安全
+#### 2. パッチ意図（思想面）
+| 観点 | 説明 |
+|---|---|
+| 原理 | 非安定データ（rank）は**ページングのキーにしない**。時系列＋IDの複合で安定化。 |
+| 安全 | 認証比較は **crypto.timingSafeEqual** を用い、時間差攻撃を抑止。 |
+| 最小 | 既存構造を壊さず **数行**で信頼性を底上げ。 |
+| 接続 | 本IはJ（DoD/スモーク）、K（思想・構造・コスト）へ橋渡しとなる。 |
+
+#### 3. 実装内容
+
+(1) rankソート時のカーソル無効化  
+- `orderClause` が rank を選んだ場合は、**cursor 受理/返却を行わない**。  
+- 代わりにヘッダ `X-Cursor-Disabled: 1` を返し、UI側でページング抑止。
+```typescript
+// GET /notes?order_by=rank の場合
+if (order_by === "rank") {
+  res.removeHeader("X-Next-Cursor");
+  res.setHeader("X-Cursor-Disabled", "1");
+}
+(2) order_by=updated_at のカーソル
+
+生成・比較とも (updated_at, id) を使う（同時刻衝突を一意化）。
+
+例（降順）：
+
+sql
+コードをコピーする
+WHERE (updated_at, id) < ($updated_at_cursor, $id_cursor)
+(3) Bearer 比較のタイミング安全
 
 typescript
 コードをコピーする
@@ -582,175 +608,21 @@ function requireAuth(req: Request, res: Response, next: NextFunction) {
   if (!ok) return res.status(401).json({ error: "Unauthorized" });
   next();
 }
-yaml
-コードをコピーする
+4. 成果指標（KPI）
+指標	期待値	測定
+認証処理時間の分散	±3ms以内	pinoメトリクス
+rank検索時のページング不整合	0%	100件試行
+カーソル安定性	再現一致	updated_at重複ケース
+変更行数	±15行以内	Git diff
+RTO影響	なし（即時反映可）	手動デプロイ確認
 
----
----
+5. 位置づけ（全体接続）
+層	役割	対応付録
+表層：運用	DoD／3分スモーク	付録J
+中層：構造	安定カーソル・安全比較	付録I（本章）
+深層：思想	思想・構造・コスト連関	付録K
 
-### 付録L：Neon接続トラブル時の手動復旧チェックリスト
+6. 補足（思想コメント）
+不安定を制御する最小修正は、構造理解に裏打ちされる。
+予測可能性＝信頼性。Iで“土台”を固め、Jで担保し、Kで意味づける。
 
-> 目的：Render・Neon・GitHub の自動再構築ルートが失敗した場合に、  
-> 管理者が3分以内にAPIを復旧させるための最小手順を明文化する。
-
----
-
-#### 🧭 手順概要（全体像）
-
-| フェーズ | 目的 | 実行者 | 所要時間 | 判定基準 |
-|-----------|------|----------|------------|------------|
-| ① 確認 | 接続障害の有無を特定 | 管理者 | 30秒 | NeonまたはRenderの応答が途絶 |
-| ② 判定 | 原因を「Neon」「Render」「ネットワーク」に分類 | 管理者 | 30秒 | Ping, Render Status, Neon Dashboard |
-| ③ 対応 | 障害箇所を手動復旧（手順表参照） | 管理者 | 90秒 | /healthが200を返すこと |
-| ④ 検証 | `/export.csv` 正常動作の確認 | 管理者 | 30秒 | CSVファイルがダウンロード可 |
-| ⑤ 記録 | ログ追記およびGitHubコミット | 管理者 | 30秒 | README_vA5.md「フェーズ」更新 |
-
----
-
-#### ⚙️ 詳細手順
-
-##### フェーズ①：障害確認
-1. ブラウザで `https://neon-api-3a0h.onrender.com/health` を開く。  
-2. 応答コードを確認：  
-   - ✅ 200 → 問題なし  
-   - ❌ 404 / 502 / Timeout → 次フェーズへ  
-
-##### フェーズ②：原因判定
-| 想定区分 | 確認項目 | 確認方法 |
-|-----------|------------|------------|
-| Neon障害 | Neon DashboardでDB接続状況を確認 | https://neon.tech/dashboard |
-| Render障害 | Render Statusページで稼働状況を確認 | https://status.render.com |
-| 通信障害 | `ping neon.tech` / `ping render.com` | CMDまたはPowerShell |
-
-結果に応じて下記の対応フェーズへ。
-
----
-
-##### フェーズ③：手動復旧
-
-| 対象 | 手順 | 期待結果 |
-|--------|------|------------|
-| Neon DB再起動 | Neon Dashboard → Project → Branch → **Restart Compute** | DB応答が再開 |
-| Render再デプロイ | Render Dashboard → Web Service → **Manual Deploy** | “Deploy logs: Finished successfully” |
-| GitHubリポ再Push | `git add . && git commit -m "manual redeploy" && git push` | Renderが自動再ビルド |
-| PowerShell再実行 | `C:\scripts\health_check.ps1` を右クリック → 実行 | ログ `[OK] phase:health` 出力 |
-
----
-
-##### フェーズ④：検証
-
-1. `/export.csv` にアクセス。  
-   - ✅ CSVダウンロード成功 → OK  
-   - ❌ エラー → Render再デプロイを再試行。  
-2. ローカルに `C:\backup\notes_YYYYMMDD.csv` が生成されることを確認。
-
----
-
-##### フェーズ⑤：記録
-
-| 項目 | 内容 |
-|------|------|
-| 更新対象 | `README_vA5.md` の「フェーズ:」欄 |
-| 記載形式 | `[OK] manual recovery @YYYY-MM-DD HH:mm JST` |
-| コミット | `git add README_vA5.md && git commit -m "manual recovery log" && git push` |
-| 併記 | `C:\logs\neon_api_monitor.log` に `[OK] phase:manual` を追記 |
-
----
-
-#### 🔐 注意事項
-- PowerShellスクリプトは**管理者権限で実行必須**。  
-- Render APIキーは `.env` に保持（漏洩厳禁）。  
-- 復旧不能時は「Render Logs」と「Neon Support」に報告。  
-- 復旧後、週次ドリル（付録G）を**直後に手動実行**して正常化を確認。
-
----
-
-#### 📜 運用メモ（推奨）
-- RTO目標：3分以内  
-- RPO目標：直前CSV（24時間以内）まで復旧可能  
-- 緊急連絡：Slack #infra-alert または電話連絡体制（別紙参照）  
-- 次期課題（vA6）：自動通知（LINE Notify / Discord Webhook）追加予定。
-
----
-付録J：3分スモーク詳細手順（運用者向け）
-
-目的：デプロイ/復旧直後に 3分以内 で最小限の健全性を確認し、RTO/RPOを満たすかを判定する。
-前提：READ_KEY と EXPORT_KEY を手元に保持していること。ホストは https://<your-host>。
-
-1. ヘルスチェック（30秒）
-curl -sS https://<your-host>/health | jq .
-
-
-期待：{"ok": true} が返る（HTTP 200）。
-
-NG時：Render の Deploy logs / Service 再起動を実施（付録L 手順参照）。
-
-2. 最小データ応答（45秒）
-curl -sS -H "Authorization: Bearer <READ_KEY>" \
-  "https://<your-host>/notes?limit=1" | jq .
-
-
-期待：配列/オブジェクトが返る（HTTP 200）。
-
-ヘッダ確認：x-request-id が付与されていること（pino ログと突合用）。
-
-3. CSV エクスポート（60秒）
-curl -sS -H "Authorization: Bearer <EXPORT_KEY>" \
-  -D /tmp/resp.headers \
-  -o notes_$(date +%Y%m%d).csv \
-  "https://<your-host>/export.csv"
-
-
-期待：
-
-HTTP 200、Content-Type: text/csv; charset=UTF-8
-
-Content-Disposition: attachment; filename="notes_YYYYMMDD.csv"
-
-ファイルは UTF-8 BOM 付き、改行は CRLF
-
-Excel 注意：長い数値は先頭 ' を付け、桁落ち防止（仕様 #8 を厳守）。
-
-4. カーソル/順位付けの一貫性（30秒）
-
-rank=true の場合、レスポンスヘッダ X-Cursor-Disabled: 1 を確認（ページング抑止）。
-
-order_by=updated_at の場合は (updated_at, id) による安定ページング（#6 仕様参照）。
-
-5. セルフテスト（PowerShell 版）（30秒）
-
-付録Lの「health_check.ps1 / recovery_drill.ps1」のいずれかを 手動起動 し、
-C:\logs\neon_api_monitor.log に [OK] または [ERROR:phase] が出力されることを確認。
-[ERROR:phase] の場合は付録Lの対応フェーズへ遷移。
-
-6. 成否判定（15秒）
-
-OK：1〜5 で全て満たす。
-
-ERROR：どれかでエラー → 付録L「詳細手順」に沿って段階復旧。
-
-付録K：技術設計の懸念・改善余地（要約）
-
-Rate Limit/DoS
-
-express-rate-limit を既定 60 req/min/IP。実運用値は Render のエラーレートと併せ最適化。
-
-CORS と認証
-
-既知オリジンのみ許可。認証は Bearer（timingSafeEqual）必須。将来は mTLS/署名付きURL検討。
-
-検索とページング
-
-pg_trgm での rank は非安定。UI には X-Cursor-Disabled を伝達し「もっと見る」を抑止。
-
-時系列ページングは (updated_at, id) 複合キー固定。
-
-監視/可観測性
-
-x-request-id の受理/生成、pino ログに {time, level, id, statusCode, responseTime, remoteAddr} を統一出力。
-
-将来：エラー比率/遅延のしきい値でアラート。
-
-CSV 互換性
-
-仕様（BOM/CRLF/列順固定/末尾追加）を堅持。Excel 互換の明文化を維持。
