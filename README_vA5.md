@@ -484,3 +484,73 @@ time, level, id(request-id), method, url, statusCode, responseTime, remoteAddr
 #### 3. 運用ログ出力
 - 出力先：`C:\logs\neon_api_monitor.log`  
 - 書式：
+---
+
+### 付録H：PowerShellスクリプト仕様  
+（health_check.ps1 / recovery_drill.ps1）
+
+> 目的：Render上のAPI稼働監視と自動復旧トリガーをPowerShellで実行。  
+> 設定位置：`C:\scripts\health_check.ps1` および `C:\scripts\recovery_drill.ps1`  
+> 実行権限：SYSTEM（タスクスケジューラから自動実行）
+
+---
+
+#### 1. health_check.ps1
+
+| 項目 | 内容 |
+|------|------|
+| 監視対象 | `https://neon-api-3a0h.onrender.com/health` |
+| 判定条件 | HTTP 200 応答で正常。それ以外は異常扱い。 |
+| ログ出力 | `C:\logs\neon_api_monitor.log` に `[OK|ERROR] phase:health` を記録。 |
+| 異常時動作 | Render API に `POST /deploys`（Webリクエスト）を送信し再デプロイを自動起動。 |
+| リトライ | 3回試行（10分間隔）。失敗時にエラーコード記録。 |
+
+擬似コード例：
+$response = Invoke-WebRequest "https://neon-api-3a0h.onrender.com/health" -UseBasicParsing
+if ($response.StatusCode -eq 200) {
+Write-Output "[OK] phase:health"
+} else {
+Write-Output "[ERROR] phase:health code:$($response.StatusCode)"
+
+Render再デプロイ
+Invoke-WebRequest "https://api.render.com/v1/services/{serviceId}/deploys" -Headers @{ Authorization="Bearer $env:RENDER_API_KEY" } -Method POST
+}
+
+yaml
+コードをコピーする
+
+---
+
+#### 2. recovery_drill.ps1
+
+| 項目 | 内容 |
+|------|------|
+| 監視対象 | `/export.csv` |
+| 実行動作 | APIアクセス → 成功時にCSV出力をローカル保存。 |
+| 出力先 | `C:\backup\notes_$(Get-Date -Format yyyyMMdd).csv` |
+| ログ出力 | `C:\logs\neon_api_monitor.log` に `[OK|ERROR] phase:drill` を追記。 |
+| 異常時動作 | Render再デプロイを試行し、成功／失敗を記録。 |
+
+擬似コード例：
+try {
+Invoke-WebRequest "https://neon-api-3a0h.onrender.com/export.csv" -OutFile "C:\backup\notes_$(Get-Date -Format yyyyMMdd).csv"
+Write-Output "[OK] phase:drill"
+} catch {
+Write-Output "[ERROR] phase:drill message:$($_.Exception.Message)"
+Invoke-WebRequest "https://api.render.com/v1/services/{serviceId}/deploys" -Headers @{ Authorization="Bearer $env:RENDER_API_KEY" } -Method POST
+}
+
+yaml
+コードをコピーする
+
+---
+
+#### 3. 共通仕様
+- すべてUTF-8で保存（BOMなし）  
+- 実行結果は `README_vA5.md` の「フェーズ: [OK] or [ERROR:phase]」行に対応  
+- 確認手順：
+  1. PowerShellで手動実行し、ステータス200を確認  
+  2. `C:\logs\neon_api_monitor.log` に出力が追加されること  
+  3. Render側で再デプロイが記録されていること（Deploy Logs）
+
+---
