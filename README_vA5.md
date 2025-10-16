@@ -672,3 +672,85 @@ yaml
 - 次期課題（vA6）：自動通知（LINE Notify / Discord Webhook）追加予定。
 
 ---
+付録J：3分スモーク詳細手順（運用者向け）
+
+目的：デプロイ/復旧直後に 3分以内 で最小限の健全性を確認し、RTO/RPOを満たすかを判定する。
+前提：READ_KEY と EXPORT_KEY を手元に保持していること。ホストは https://<your-host>。
+
+1. ヘルスチェック（30秒）
+curl -sS https://<your-host>/health | jq .
+
+
+期待：{"ok": true} が返る（HTTP 200）。
+
+NG時：Render の Deploy logs / Service 再起動を実施（付録L 手順参照）。
+
+2. 最小データ応答（45秒）
+curl -sS -H "Authorization: Bearer <READ_KEY>" \
+  "https://<your-host>/notes?limit=1" | jq .
+
+
+期待：配列/オブジェクトが返る（HTTP 200）。
+
+ヘッダ確認：x-request-id が付与されていること（pino ログと突合用）。
+
+3. CSV エクスポート（60秒）
+curl -sS -H "Authorization: Bearer <EXPORT_KEY>" \
+  -D /tmp/resp.headers \
+  -o notes_$(date +%Y%m%d).csv \
+  "https://<your-host>/export.csv"
+
+
+期待：
+
+HTTP 200、Content-Type: text/csv; charset=UTF-8
+
+Content-Disposition: attachment; filename="notes_YYYYMMDD.csv"
+
+ファイルは UTF-8 BOM 付き、改行は CRLF
+
+Excel 注意：長い数値は先頭 ' を付け、桁落ち防止（仕様 #8 を厳守）。
+
+4. カーソル/順位付けの一貫性（30秒）
+
+rank=true の場合、レスポンスヘッダ X-Cursor-Disabled: 1 を確認（ページング抑止）。
+
+order_by=updated_at の場合は (updated_at, id) による安定ページング（#6 仕様参照）。
+
+5. セルフテスト（PowerShell 版）（30秒）
+
+付録Lの「health_check.ps1 / recovery_drill.ps1」のいずれかを 手動起動 し、
+C:\logs\neon_api_monitor.log に [OK] または [ERROR:phase] が出力されることを確認。
+[ERROR:phase] の場合は付録Lの対応フェーズへ遷移。
+
+6. 成否判定（15秒）
+
+OK：1〜5 で全て満たす。
+
+ERROR：どれかでエラー → 付録L「詳細手順」に沿って段階復旧。
+
+付録K：技術設計の懸念・改善余地（要約）
+
+Rate Limit/DoS
+
+express-rate-limit を既定 60 req/min/IP。実運用値は Render のエラーレートと併せ最適化。
+
+CORS と認証
+
+既知オリジンのみ許可。認証は Bearer（timingSafeEqual）必須。将来は mTLS/署名付きURL検討。
+
+検索とページング
+
+pg_trgm での rank は非安定。UI には X-Cursor-Disabled を伝達し「もっと見る」を抑止。
+
+時系列ページングは (updated_at, id) 複合キー固定。
+
+監視/可観測性
+
+x-request-id の受理/生成、pino ログに {time, level, id, statusCode, responseTime, remoteAddr} を統一出力。
+
+将来：エラー比率/遅延のしきい値でアラート。
+
+CSV 互換性
+
+仕様（BOM/CRLF/列順固定/末尾追加）を堅持。Excel 互換の明文化を維持。
