@@ -218,3 +218,55 @@ paths:
       responses:
         '200':
           description: CSVファイルを返す
+---
+
+### 付録B：Neon スキーマ DDL・索引・トリガー（再掲／適用可）
+
+> 目的：`notes` テーブルの最小スキーマを再現し、`updated_at` 自動更新と検索性能（pg_trgm）を確保する。  
+> 方針：**安全な再適用**（IF NOT EXISTS／OR REPLACE）で idempotent に実行できる SQL を提示。
+
+#### ✅ 前提
+```sql
+-- 必要拡張（類似度検索）
+CREATE EXTENSION IF NOT EXISTS pg_trgm;
+CREATE TABLE IF NOT EXISTS public.notes (
+  id          BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+  content     TEXT NOT NULL,
+  tags        TEXT[] DEFAULT '{}'::text[] NOT NULL,
+  created_at  TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  updated_at  TIMESTAMPTZ
+);
+CREATE OR REPLACE FUNCTION public.set_updated_at()
+RETURNS TRIGGER LANGUAGE plpgsql AS $$
+BEGIN
+  NEW.updated_at := NOW();
+  RETURN NEW;
+END $$;
+
+DROP TRIGGER IF EXISTS trg_set_updated_at ON public.notes;
+CREATE TRIGGER trg_set_updated_at
+BEFORE UPDATE ON public.notes
+FOR EACH ROW EXECUTE FUNCTION public.set_updated_at();
+-- updated_at ソート安定化用（併用: id）
+CREATE INDEX IF NOT EXISTS idx_notes_updated_at ON public.notes (updated_at, id);
+
+-- 全文・類似度検索（pg_trgm）
+CREATE INDEX IF NOT EXISTS idx_notes_content_trgm
+  ON public.notes USING GIN (content gin_trgm_ops);
+
+-- タグ検索（配列包含）
+CREATE INDEX IF NOT EXISTS idx_notes_tags_gin
+  ON public.notes USING GIN (tags);
+-- テーブル定義確認
+\d+ public.notes
+
+-- 拡張と索引確認
+\dx
+SELECT indexname, indexdef FROM pg_indexes WHERE tablename = 'notes';
+5) メモ
+
+order_by=updated_at 時は (updated_at, id) の複合インデックスで安定化。
+
+rank=true（pg_trgm 類似度）とカーソルは排他、実装は本文 #6 を参照。
+
+追加列は末尾追加で CSV 互換性を維持（本文 #8）。
