@@ -389,3 +389,35 @@ time, level, id(request-id), method, url, statusCode, responseTime, remoteAddr
 - 将来リリース（vA6）では`express@5`対応を想定（現行は安全域に留める）。
 
 ---
+---
+
+### 付録E：tsconfig.json 差分（vA4→vA5）
+
+> 目的：TypeScript 設定の改訂点を明示し、ビルド挙動を固定化。  
+> 変更内容は vA4 の `strict` モード維持を前提に、ES仕様とRender環境の互換性を調整。
+
+#### 1. 差分一覧
+| 区分 | プロパティ | vA4 | vA5 | 備考 |
+|------|-------------|-----|-----|------|
+| 維持 | `target` | ES2020 | ES2020 | Node 18互換維持 |
+| 更新 | `module` | commonjs | ESNext | RenderのESM最適化対応 |
+| 更新 | `moduleResolution` | node | node16 | Node.js 18準拠 |
+| 維持 | `outDir` | ./dist | ./dist | 不変 |
+| 追加 | `resolveJsonModule` | — | true | JSONインポート許可 |
+| 追加 | `forceConsistentCasingInFileNames` | — | true | クロスプラットフォーム互換性向上 |
+| 維持 | `strict` | true | true | 厳格モード維持 |
+| 維持 | `skipLibCheck` | true | true | ビルド速度優先 |
+
+#### 2. include / exclude 設定
+| 設定項目 | 内容 |
+|-----------|------|
+| include | `["src/**/*.ts", "server.ts"]` |
+| exclude | `["node_modules", "dist"]` |
+
+#### 3. 運用上の補足
+- Render環境では自動的に `ts-node` → `node dist/server.js` に変換。  
+- `moduleResolution: node16` により、`.mts/.cts` ファイルをサポート。  
+- `strict` フラグにより、すべての関数引数・戻り値でnull安全を保証。  
+- ESM最適化は **vA6** 移行時の `import` 文統一に備えるための暫定措置。  
+
+---
