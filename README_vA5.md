@@ -626,3 +626,69 @@ RTO影響	なし（即時反映可）	手動デプロイ確認
 不安定を制御する最小修正は、構造理解に裏打ちされる。
 予測可能性＝信頼性。Iで“土台”を固め、Jで担保し、Kで意味づける。
 
+---
+
+### 付録J：DoDテンプレート & 3分スモークテスト
+
+#### 1. 概要
+この付録は「デプロイ完了後、3分以内で最低限の健全性を確認する」ための  
+**Definition of Done（DoD）テンプレート兼スモークテスト手順**です。  
+I（最小パッチ例）を適用後、RTO/RPOを満たすかの即時検証に使用します。
+
+---
+
+#### 2. テスト環境・前提
+- 対象：Render API／Neon DB／GitHub main branch
+- ツール：curl, jq, PowerShell（いずれもローカル端末で実行可）
+- 事前：`READ_KEY` と `EXPORT_KEY` を手元に保有していること
+
+---
+
+#### 3. 手順概要（3分以内）
+
+| 手順 | 概要 | 期待値 | 所要時間 |
+|------|------|---------|-----------|
+| ① | `/health` チェック | HTTP 200 `{ ok: true }` | 約30秒 |
+| ② | `/notes` 取得 | JSON配列＋ `x-request-id` 付与 | 約45秒 |
+| ③ | `/export.csv` 実行 | CSV生成、HTTP 200 | 約60秒 |
+| ④ | PowerShellログ確認 | `phase:health` または `phase:drill` 出力 | 約30秒 |
+| ⑤ | Render再デプロイログ確認 | `Deploy logs: Finished successfully` | 約15秒 |
+
+---
+
+#### 4. コマンド例（Windows環境）
+
+**① ヘルスチェック**
+```bash
+curl -s https://<your-host>/health | jq
+② ノート一覧
+
+bash
+コードをコピーする
+curl -s -H "Authorization: Bearer <READ_KEY>" \
+"https://<your-host>/notes?limit=1" | jq
+③ CSVエクスポート
+
+bash
+コードをコピーする
+curl -s -H "Authorization: Bearer <EXPORT_KEY>" \
+-o notes_$(Get-Date -Format yyyyMMdd).csv \
+"https://<your-host>/export.csv"
+5. 検証基準
+項目	期待結果
+/health	{ "ok": true }
+/notes	JSON配列（[]可）＋ x-request-id 含有
+/export.csv	HTTP 200, Content-Type: text/csv
+PowerShell	phase:health または phase:drill 出力
+
+6. 成否判定
+OK：上記5項すべて満たす。
+
+NG：いずれか欠けた場合、付録H「スクリプト仕様」または付録I「最小パッチ例」を参照し手動復旧。
+
+7. 運用ノート
+本テストは毎週ドリル（定期復旧演習）でも使用可能。
+
+結果を C:\logs\neon_api_monitor.log に追記し、phaseタグ（例：phase:smoke）を付与。
+
+SlackまたはLINE NotifyへWebhook送信予定（vA6以降対応）。
