@@ -455,3 +455,32 @@ time, level, id(request-id), method, url, statusCode, responseTime, remoteAddr
 - 手動再起動は `Render Dashboard > Manual Deploy` で実行可。  
 
 ---
+---
+
+### 付録G：タスクスケジューラ定義（監視・週次ドリル）
+
+> 目的：/health エンドポイント監視と週次復旧訓練を自動実行する。  
+> 手段：Windows タスクスケジューラ + PowerShell スクリプト（付録H参照）。
+
+#### 1. タスク構成（監視用）
+| 項目 | 設定内容 |
+|------|----------|
+| 名称 | Neon-API_HealthCheck |
+| トリガー | 1時間ごと（00分実行） |
+| 実行ファイル | `powershell.exe` |
+| 引数 | `-ExecutionPolicy Bypass -File "C:\scripts\health_check.ps1"` |
+| 開始条件 | ログオン不要（SYSTEM権限） |
+| 動作 | `/health` にHTTPリクエスト→200応答なら正常／異常時はログ記録＆再起動試行 |
+
+#### 2. タスク構成（週次ドリル用）
+| 項目 | 設定内容 |
+|------|----------|
+| 名称 | Neon-API_RecoveryDrill |
+| トリガー | 毎週月曜 03:00 JST |
+| 実行ファイル | `powershell.exe` |
+| 引数 | `-ExecutionPolicy Bypass -File "C:\scripts\recovery_drill.ps1"` |
+| 動作 | `/export.csv` 実行 → 成功／失敗をログ出力 → `Render API` 再デプロイトリガー |
+
+#### 3. 運用ログ出力
+- 出力先：`C:\logs\neon_api_monitor.log`  
+- 書式：
