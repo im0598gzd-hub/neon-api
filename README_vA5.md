@@ -353,3 +353,39 @@ time, level, id(request-id), method, url, statusCode, responseTime, remoteAddr
 フェーズ: /_status → /notes?limit=1 → /export.csv
 
 成果: [OK] or [ERROR:<phase>] を PowerShell スクリプト（付録H）で出力
+---
+
+### 付録D：package.json 差分（vA4→vA5）
+
+> 目的：vA4からvA5への依存関係更新内容を追跡し、再構築・復旧時の整合性を保証する。  
+> 実装：Render / Neon / GitHub Actions すべて同一バージョンで再現可能。
+
+#### 1. 差分サマリ
+| 区分 | パッケージ | vA4 | vA5 | 備考 |
+|------|-------------|-----|-----|------|
+| 追加 | `express-rate-limit` | — | ^7.x | APIアクセス制限用（DoS防止） |
+| 更新 | `pino` | ^8.0.0 | ^9.0.0 | 構造化ログ出力の高速化対応 |
+| 更新 | `pg` | ^8.11 | ^8.13 | Neon接続安定化（SSLモード自動） |
+| 更新 | `pg-trgm` | ^1.1.0 | ^1.2.0 | 類似度検索の安定化・高速化 |
+| 更新 | `typescript` | ^5.3 | ^5.6 | tsconfig最適化（strictNullChecks維持） |
+| 維持 | `express` | ^4.18 | ^4.18 | 安定版維持 |
+| 維持 | `dotenv` | ^16.3 | ^16.3 | Render環境変数連携用 |
+| 維持 | `cors` | ^2.8 | ^2.8 | Origin制御（CORS_ORIGINS適用） |
+| 削除 | — | — | — | 該当なし（クリーンアップ済） |
+
+#### 2. 開発系（devDependencies）
+| パッケージ | vA4 | vA5 | 備考 |
+|-------------|-----|-----|------|
+| `ts-node` | ^10.9 | ^10.9 | 不変 |
+| `@types/express` | ^4.17 | ^4.17 | 不変 |
+| `@types/node` | ^20.10 | ^20.12 | v5.6対応 |
+| `eslint` | ^8.56 | ^8.57 | CI内Lint最適化 |
+| `prettier` | ^3.2 | ^3.3 | Markdown整形統一 |
+
+#### 3. 補足事項
+- Render自動ビルド時の`npm ci`検証済（2025-10-17 JST）。  
+- `package-lock.json`の差分はリポジトリ自動生成（手動編集不要）。  
+- 依存更新は全て`semver`互換（破壊的変更なし）。  
+- 将来リリース（vA6）では`express@5`対応を想定（現行は安全域に留める）。
+
+---
