@@ -47,8 +47,8 @@ jobs:
 
           # レコード数はCSVパーサで数える（改行入りフィールドに強い）
           # 先頭1行はヘッダなので-1する
-          rows=$(python3 - << 'PY'
-import csv, sys
+          rows=$(python3 - <<'PY'
+import csv
 with open("backups/tmp/export.csv", "r", encoding="utf-8", newline="") as f:
     r = csv.reader(f)
     n = sum(1 for _ in r)
