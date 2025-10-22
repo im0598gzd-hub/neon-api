@@ -1,0 +1,67 @@
+name: Health Check Monitor
+
+on:
+  schedule:
+    - cron: "0 * * * *" # 毎時0分（UTC）に実行。JSTでは毎時9分。
+  workflow_dispatch:
+
+permissions:
+  actions: read
+  issues: write
+
+jobs:
+  healthcheck:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Call /health endpoint
+        id: call
+        run: |
+          response=$(curl -s -o /dev/null -w "%{http_code}" https://neon-api-3a0h.onrender.com/health)
+          echo "status=$response" >> $GITHUB_OUTPUT
+
+      - name: Get previous run status
+        id: previous
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const runs = await github.rest.actions.listWorkflowRuns({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              workflow_id: "healthcheck.yml",
+              per_page: 2
+            });
+            const previous = runs.data.workflow_runs[1];
+            return previous ? previous.conclusion : "none";
+          result-encoding: string
+
+      - name: Create issue if two consecutive failures
+        if: steps.call.outputs.status != '200' && steps.previous.outputs.result == 'failure'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const { owner, repo } = context.repo;
+            const title = "⚠️ Health check failed twice consecutively";
+            const body = "The /health endpoint returned non-200 twice in a row.\nURL: https://neon-api-3a0h.onrender.com/health";
+            const existing = await github.rest.issues.listForRepo({
+              owner, repo, state: "open", labels: "health-monitor"
+            });
+            if (!existing.data.some(i => i.title === title)) {
+              await github.rest.issues.create({
+                owner, repo, title, body, labels: ["health-monitor"]
+              });
+            }
+
+      - name: Close issue if recovered
+        if: steps.call.outputs.status == '200'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const { owner, repo } = context.repo;
+            const issues = await github.rest.issues.listForRepo({
+              owner, repo, state: "open", labels: "health-monitor"
+            });
+            for (const issue of issues.data) {
+              await github.rest.issues.update({
+                owner, repo, issue_number: issue.number, state: "closed"
+              });
+            }
