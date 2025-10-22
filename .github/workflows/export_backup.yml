@@ -37,6 +37,7 @@ jobs:
             "${RENDER_URL}/notes/export.csv?limit=10000" \
             -o backups/tmp/export.csv
 
+          # サイズ確認
           sz=$(wc -c < backups/tmp/export.csv || echo 0)
           echo "size=${sz}" >> "$GITHUB_OUTPUT"
           if [ "${sz}" -le 0 ]; then
@@ -44,18 +45,12 @@ jobs:
             exit 1
           fi
 
-          echo "Counting records..."
-          rows=$(python3 <<'PY'
-import csv
-with open("backups/tmp/export.csv", "r", encoding="utf-8", newline="") as f:
-    r = csv.reader(f)
-    n = sum(1 for _ in r)
-print(max(0, n-1))
-PY
-)
+          # ヘッダを除いたレコード数をシェルだけで数える（ヒアドキュメント不使用）
+          rows=$(( $(tail -n +2 backups/tmp/export.csv | wc -l | tr -d ' ') ))
           echo "Downloaded rows (records): ${rows}"
           echo "rows=${rows}" >> "$GITHUB_OUTPUT"
 
+          # 保存
           dest="backups/notes_${{ steps.date.outputs.today }}.csv"
           mkdir -p backups
           mv -f backups/tmp/export.csv "${dest}"
