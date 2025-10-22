@@ -30,13 +30,14 @@ jobs:
         run: |
           set -e
           mkdir -p backups/tmp
-          # HTTPエラー時は失敗 (-f)、リダイレクト追従 (-L)、静かなログ (-sS)
+
+          # 1) CSVをダウンロード（HTTPエラー時失敗: -f, リダイレクト追従: -L, 静かに: -sS）
           curl -fLsS \
             -H "Authorization: Bearer ${EXPORT_KEY}" \
-            "${RENDER_URL}/notes/export.csv" \
+            "${RENDER_URL}/notes/export.csv?limit=10000" \
             -o backups/tmp/export.csv
 
-          # サイズ検証（0バイトは失敗扱い）
+          # 2) サイズ検証（0バイトは失敗扱い）
           sz=$(wc -c < backups/tmp/export.csv || echo 0)
           echo "size=$sz" >> "$GITHUB_OUTPUT"
           if [ "$sz" -le 0 ]; then
@@ -44,7 +45,12 @@ jobs:
             exit 1
           fi
 
-          # 保存ファイル名にUTC日付を付与
+          # 3) 行数（ヘッダー除く）をカウントしてログに出す
+          rows=$(tail -n +2 backups/tmp/export.csv | wc -l | tr -d ' ')
+          echo "rows=$rows" >> "$GITHUB_OUTPUT"
+          echo "Downloaded rows: $rows"
+
+          # 4) 保存ファイル名（UTC日付）
           dest="backups/notes_${{ steps.date.outputs.today }}.csv"
           mkdir -p backups
           mv -f backups/tmp/export.csv "$dest"
@@ -56,7 +62,7 @@ jobs:
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git add "${{ steps.dl.outputs.dest }}"
-          git commit -m "chore(backup): notes_${{ steps.date.outputs.today }}.csv" || echo "No changes to commit."
+          git commit -m "chore(backup): notes_${{ steps.date.outputs.today }}.csv (rows=${{ steps.dl.outputs.rows }})" || echo "No changes to commit."
           git push
 
       - name: Open issue if backup failed
