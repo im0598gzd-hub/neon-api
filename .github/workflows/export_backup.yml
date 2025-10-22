@@ -2,7 +2,7 @@ name: Daily CSV Backup
 
 on:
   schedule:
-    # 毎日 0:00 UTC（= 日本時間 9:00）に実行
+    # 毎日 0:00 UTC（= 日本時間 9:00）
     - cron: "0 0 * * *"
   workflow_dispatch:
 
@@ -22,7 +22,7 @@ jobs:
         id: date
         run: echo "today=$(date -u +%Y%m%d)" >> "$GITHUB_OUTPUT"
 
-      - name: Download /export.csv
+      - name: Download /notes/export.csv
         id: dl
         env:
           EXPORT_KEY: ${{ secrets.EXPORT_KEY }}
@@ -33,7 +33,7 @@ jobs:
           # HTTPエラー時は失敗 (-f)、リダイレクト追従 (-L)、静かなログ (-sS)
           curl -fLsS \
             -H "Authorization: Bearer ${EXPORT_KEY}" \
-            "${RENDER_URL}/export.csv" \
+            "${RENDER_URL}/notes/export.csv" \
             -o backups/tmp/export.csv
 
           # サイズ検証（0バイトは失敗扱い）
@@ -51,32 +51,8 @@ jobs:
           echo "dest=$dest" >> "$GITHUB_OUTPUT"
 
       - name: Commit CSV to repo
-        # ダウンロード成功時のみコミット
         if: ${{ success() }}
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add "${{ steps.dl.outputs.dest }}"
-          git commit -m "chore(backup): notes_${{ steps.date.outputs.today }}.csv" || echo "No changes to commit."
-          git push
-
-      - name: Open issue if backup failed
-        if: ${{ failure() }}
-        uses: actions/github-script@v7
-        with:
-          script: |
-            const {owner, repo} = context.repo
-            const title = "CSV backup failed"
-            const body = [
-              "Daily CSV backup failed.",
-              `Workflow run: ${context.serverUrl}/${owner}/${repo}/actions/runs/${context.runId}`
-            ].join("\n")
-            // 既存の未クローズIssueがあれば重複起票しない
-            const { data: issues } = await github.rest.issues.listForRepo({
-              owner, repo, state: "open", labels: "backup"
-            })
-            if (!issues.some(i => i.title === title)) {
-              await github.rest.issues.create({
-                owner, repo, title, body, labels: ["backup"]
-              })
-            }
+          git add "${{ steps.dl.outputs
