@@ -8,8 +8,8 @@ on:
 
 permissions:
   actions: read
-  contents: write        # 自動コミット
-  issues: write          # 失敗時のIssue起票
+  contents: write
+  issues: write
 
 jobs:
   backup:
@@ -31,13 +31,12 @@ jobs:
           set -e
           mkdir -p backups/tmp
 
-          # ダウンロード（HTTPエラー時失敗、リダイレクト追従、静かなログ）
+          echo "Downloading CSV..."
           curl -fLss \
             -H "Authorization: Bearer ${EXPORT_KEY}" \
             "${RENDER_URL}/notes/export.csv?limit=10000" \
             -o backups/tmp/export.csv
 
-          # サイズ確認（0バイトでないこと）
           sz=$(wc -c < backups/tmp/export.csv || echo 0)
           echo "size=${sz}" >> "$GITHUB_OUTPUT"
           if [ "${sz}" -le 0 ]; then
@@ -45,9 +44,8 @@ jobs:
             exit 1
           fi
 
-          # レコード数はCSVパーサで数える（改行入りフィールドに強い）
-          # 先頭1行はヘッダなので-1する
-          rows=$(python3 - <<'PY'
+          echo "Counting records..."
+          rows=$(python3 <<'PY'
 import csv
 with open("backups/tmp/export.csv", "r", encoding="utf-8", newline="") as f:
     r = csv.reader(f)
@@ -58,7 +56,6 @@ PY
           echo "Downloaded rows (records): ${rows}"
           echo "rows=${rows}" >> "$GITHUB_OUTPUT"
 
-          # 保存ファイル名
           dest="backups/notes_${{ steps.date.outputs.today }}.csv"
           mkdir -p backups
           mv -f backups/tmp/export.csv "${dest}"
@@ -67,7 +64,7 @@ PY
       - name: Commit CSV to repo
         if: ${{ success() }}
         run: |
-          git config user.name  "github-actions[bot]"
+          git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git add "${{ steps.dl.outputs.dest }}"
           git commit -m "chore(backup): ${{ steps.dl.outputs.dest }} (size=${{ steps.dl.outputs.size }}, rows=${{ steps.dl.outputs.rows }})" || echo "Nothing to commit"
@@ -85,5 +82,6 @@ PY
             await github.rest.issues.create({
               owner: context.repo.owner,
               repo: context.repo.repo,
-              title, body
-            })
+              title,
+              body
+            });
