@@ -1,5 +1,5 @@
 import express, { Request, Response, NextFunction } from "express";
-import cors from "cors";
+import cors, { CorsOptions } from "cors";
 import { neon } from "@neondatabase/serverless";
 
 const app = express();
@@ -8,15 +8,44 @@ const app = express();
 const PORT = process.env.PORT || 3000;
 const API_KEY = process.env.API_KEY || "";
 const DATABASE_URL = process.env.DATABASE_URL || "";
+const UI_ORIGIN = process.env.UI_ORIGIN || ""; // ← 追加：厳密一致で許可するUIのOrigin
 
 if (!DATABASE_URL) {
   console.error("DATABASE_URL is not set");
   process.exit(1);
 }
+if (!UI_ORIGIN) {
+  // セキュア運用のため、UI_ORIGIN未設定なら起動しない
+  console.error("UI_ORIGIN is not set (example: https://im-github.github.io)");
+  process.exit(1);
+}
+
 const sql = neon(DATABASE_URL);
 
 /* ===== Middlewares ===== */
-app.use(cors());
+
+/**
+ * CORS: 厳密一致
+ * - 許可Origin：UI_ORIGIN（例: https://im-github.github.io）に完全一致のみ
+ * - 許可メソッド：GET, POST, OPTIONS（最小）
+ * - 許可ヘッダ：Authorization, Content-Type（最小）
+ * - Access-Control-Allow-Credentials は付与しない（デフォルト: false）
+ * - Origin ヘッダ無し（サーバ間アクセス等）は CORS ヘッダを付けない（通常応答）
+ */
+const corsOptions: CorsOptions = {
+  origin: (origin, callback) => {
+    // ブラウザ以外（Originなし）はCORS不要なのでヘッダ付けない
+    if (!origin) return callback(null, false);
+    if (origin === UI_ORIGIN) return callback(null, true);
+    return callback(null, false);
+  },
+  methods: ["GET", "POST", "OPTIONS"],
+  allowedHeaders: ["Authorization", "Content-Type"],
+  optionsSuccessStatus: 204,
+  maxAge: 600,
+};
+
+app.use(cors(corsOptions));
 app.use(express.json({ limit: "1mb" }));
 
 // minimal audit log
@@ -138,7 +167,6 @@ function buildNotesFilters(req: Request) {
   const q = qRaw.length > 0 ? qRaw : "";
   const qLen = q.length;
 
-  // q_mode: exact / partial / trgm（未指定は partial）
   const qm = typeof req.query.q_mode === "string" ? req.query.q_mode.toLowerCase() : "";
   const q_mode: "exact" | "partial" | "trgm" =
     qm === "exact" ? "exact" : qm === "trgm" ? "trgm" : "partial";
@@ -171,7 +199,6 @@ function buildNotesFilters(req: Request) {
       const i = values.push(q);
       whereParts.push(`content = $${i}`);
     } else if (q_mode === "trgm" && qLen >= 3) {
-      // pg_trgm を明示使用。短い語（<3）はILIKEにフォールバック
       const i = values.push(q);
       whereParts.push(`content % $${i}`);
     } else {
@@ -180,7 +207,6 @@ function buildNotesFilters(req: Request) {
     }
   }
 
-  // tags
   if (tagsAll.length + tagsAny.length + tagsNone.length > 0) {
     if (tagsMatch === "exact") {
       if (tagsAll.length > 0) {
@@ -196,7 +222,6 @@ function buildNotesFilters(req: Request) {
         whereParts.push(`NOT (tags && $${i})`);
       }
     } else {
-      // 部分一致（配列要素の部分一致）
       const buildPartial = (patterns: string[], mode: "all" | "any" | "none") => {
         if (patterns.length === 0) return "";
         const clauses = patterns.map((p) => {
@@ -274,7 +299,7 @@ function buildZeroResultTips(opts: {
   return Array.from(new Set(tips)).slice(0, 5);
 }
 
-/* ===== NEW: 0件時メッセージを自然文で整形（無料テンプレ） ===== */
+/* ===== NEW: 0件時メッセージ ===== */
 function formatFriendlyTips(message: string, tips: string[], echo: any) {
   const q = (echo?.q ?? "").toString();
   const hint =
@@ -340,7 +365,6 @@ app.get("/notes", requireAuth, async (req, res) => {
       String(req.query.rank ?? "").toLowerCase() === "true";
     const rankMin = Number.isFinite(Number(req.query.rank_min)) ? Number(req.query.rank_min) : null;
 
-    // クエリからWHERE作成
     const built = buildNotesFilters(req);
     if ("error" in built) return res.status(400).json({ error: built.error });
 
@@ -352,20 +376,17 @@ app.get("/notes", requireAuth, async (req, res) => {
       values.push(...built.values);
     }
 
-    // rank（pg_trgm: similarity）: 3文字未満は無効化（ヘッダで通知）
     const rankDisabled = built.qLen > 0 && built.qLen < 3;
     if (rankDisabled) {
       res.setHeader("X-Rank-Disabled", "1");
     }
 
-    // rank_min フィルタ（有効時のみ）
     if (!rankDisabled && built.q && rankMin !== null && !isNaN(rankMin)) {
       const i = values.push(built.q);
       const j = values.push(rankMin);
       whereParts.push(`similarity(content, $${i}) >= $${j}`);
     }
 
-    // cursor または offset
     if (cursor && !req.query.offset) {
       const cmp = order === "asc" ? ">" : "<";
       if (orderBy === "created_at") {
@@ -373,7 +394,7 @@ app.get("/notes", requireAuth, async (req, res) => {
         const i2 = values.push(cursor.id);
         whereParts.push(`(created_at, id) ${cmp} ($${i1}::timestamptz, $${i2}::int)`);
       } else if (orderBy === "updated_at") {
-        const i1 = values.push(cursor.created_at); // for compatibility
+        const i1 = values.push(cursor.created_at);
         const i2 = values.push(cursor.id);
         whereParts.push(`(updated_at, id) ${cmp} ($${i1}::timestamptz, $${i2}::int)`);
       } else {
@@ -392,7 +413,6 @@ app.get("/notes", requireAuth, async (req, res) => {
         ? `ORDER BY updated_at ${order}, id ${order}`
         : `ORDER BY id ${order}`;
 
-    // SELECT 列
     const cols =
       wantRank && !rankDisabled && built.q
         ? `id, content, tags, created_at, updated_at, similarity(content, $${values.push(built.q)}) as _rank`
@@ -412,7 +432,6 @@ app.get("/notes", requireAuth, async (req, res) => {
       values
     );
 
-    // 0件時：自然言語ヒントを返す（friendly_text を追加）
     if (!rows || rows.length === 0) {
       const tips = buildZeroResultTips({
         q: built.q,
@@ -448,7 +467,6 @@ app.get("/notes", requireAuth, async (req, res) => {
       });
     }
 
-    // cursor next
     if (!req.query.offset && rows && rows.length === limit) {
       const last = rows[rows.length - 1];
       res.setHeader("X-Next-Cursor", encodeCursor(last.created_at, last.id));
@@ -478,7 +496,7 @@ app.get("/notes/count", requireAuth, async (req, res) => {
   }
 });
 
-// GET /notes/export.csv  （UTF-8+BOM、JSTの日時、rank_min 反映）
+// GET /notes/export.csv
 app.get("/notes/export.csv", requireAuth, async (req, res) => {
   try {
     const orderBy = parseOrderBy(req.query.order_by);
