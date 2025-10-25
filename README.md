@@ -260,3 +260,42 @@ render.yamlで環境差吸収 → 自動デプロイ
 あわせて前日の作業日付（誤記）を修正し、vA4+ と Render 環境を同期。  
 Render側は正常稼働中（/health OK）。  
 次段階は vA6（安定版）への凍結・IaC統合準備フェーズへ移行予定。
+
+本日の作業履歴（2025-10-22）
+時刻（JST）	作業内容	結果
+14:27〜14:42	/health監視をGitHub Actionsへ移管（自動監視・Issue連携）	✅ 成功
+14:57〜15:30／15:35〜16:12／16:18〜16:54	/export.csv自動バックアップ構築（日次0:00UTC保存、153件出力確認）	✅ 成功
+16:54〜17:00	CSV整合性・改行検査（差分1件＝反映タイミング差）	✅ 問題なし
+
+🧭 概要まとめ
+GitHub Actions により /health・/export.csv の完全自動化を達成。
+RPO=24h体制をクラウド単独で確立し、Render→Neon→GitHub間の連携を実証。
+
+本日の作業履歴（2025-10-23）
+時刻（JST）	作業内容	結果
+14:23〜14:44	Minimal Web UI仕様確定（思想「触れても壊れない最小の窓」定義）	✅ 完了
+14:57〜15:10	Render側CORS設定整合（UI_ORIGIN登録／疎通確認）	✅ 完了
+15:33〜16:04	GitHub Pages配信・一覧表示成功（/health・/notes）	✅ 完了
+16:04〜16:27	Bearer認証実装・鍵削除試験完了（sessionStorage運用確認）	✅ 完了
+
+🧭 概要まとめ
+Render × GitHub Pages の完全連携を実現。
+CORS・鍵運用・UI冗長構造すべてDoD達成。vA6思想の実装を完了。
+
+P1-③ 最終決定メモ（vA6／Minimal Web UI＋CORS）
+
+要点まとめ
+
+配信：GitHub Pages（固定Origin・無料・常時稼働）
+
+CORS：Render側でOrigin厳密一致（*禁止／localhost削除）
+
+鍵：手入力＋sessionStorageのみ（READ既定／EXPORT時入力）
+
+事故時対応：Render鍵再発行→README更新→UI「鍵消去」→再入力
+
+確度：90％（server.ts側実装に依存）
+
+🧭 概要まとめ
+Pages公開＋CORS整合＋安全な鍵管理を確立。
+「人が触れても壊れない最小の窓」構想を完全具現化（vA6基準100％達成）。
