@@ -1,45 +1,113 @@
+// server.ts (three-scope auth: READ / EXPORT / ADMIN)
+
 import express, { Request, Response, NextFunction } from "express";
 import cors, { CorsOptions } from "cors";
 import { neon } from "@neondatabase/serverless";
+import crypto from "crypto";
 
 const app = express();
 
 /* ===== Runtime config ===== */
 const PORT = process.env.PORT || 3000;
-const API_KEY = process.env.API_KEY || "";
+
+// New: three keys
+const READ_KEY_RAW = process.env.READ_KEY || "";
+const EXPORT_KEY_RAW = process.env.EXPORT_KEY || "";
+const ADMIN_KEY_RAW = process.env.ADMIN_KEY || "";
+
+// Backward-compat (optional): treat API_KEY as ADMIN during migration
+const API_KEY_LEGACY = process.env.API_KEY || "";
+
 const DATABASE_URL = process.env.DATABASE_URL || "";
-const UI_ORIGIN = process.env.UI_ORIGIN || ""; // ← 追加：厳密一致で許可するUIのOrigin
+const UI_ORIGIN = process.env.UI_ORIGIN || ""; // strict match
 
 if (!DATABASE_URL) {
   console.error("DATABASE_URL is not set");
   process.exit(1);
 }
 if (!UI_ORIGIN) {
-  // セキュア運用のため、UI_ORIGIN未設定なら起動しない
   console.error("UI_ORIGIN is not set (example: https://im-github.github.io)");
   process.exit(1);
 }
 
+// Warn for missing keys (don’t exit: “鍵すべて消去”のテストや段階導入に対応)
+if (!READ_KEY_RAW) console.warn("[WARN] READ_KEY is empty (read endpoints will 401).");
+if (!EXPORT_KEY_RAW) console.warn("[WARN] EXPORT_KEY is empty (export endpoints will 401).");
+if (!ADMIN_KEY_RAW && !API_KEY_LEGACY) {
+  console.warn("[WARN] ADMIN_KEY is empty (write endpoints will 401).");
+}
+if (API_KEY_LEGACY) {
+  console.warn("[MIGRATION] API_KEY is present. It will be accepted as ADMIN (temporary).");
+}
+
 const sql = neon(DATABASE_URL);
+
+/* ===== Security helpers (constant-time compare) ===== */
+
+function sha256Buf(s: string): Buffer {
+  // Hash to fixed-length buffer for timingSafeEqual
+  return crypto.createHash("sha256").update(s, "utf8").digest();
+}
+const READ_KEY_HASH = READ_KEY_RAW ? sha256Buf(READ_KEY_RAW) : null;
+const EXPORT_KEY_HASH = EXPORT_KEY_RAW ? sha256Buf(EXPORT_KEY_RAW) : null;
+const ADMIN_KEY_HASH = ADMIN_KEY_RAW ? sha256Buf(ADMIN_KEY_RAW) : null;
+const API_KEY_LEGACY_HASH = API_KEY_LEGACY ? sha256Buf(API_KEY_LEGACY) : null;
+
+function getBearer(req: Request): string | null {
+  const h = req.header("authorization") || "";
+  const m = h.match(/^Bearer\s+(.+)$/i);
+  return m ? m[1] : null;
+}
+
+function safeEqualAgainst(hash: Buffer | null, candidate: string): boolean {
+  if (!hash) return false;
+  const cand = sha256Buf(candidate);
+  // same length by construction; timingSafeEqual requires same length buffers
+  try {
+    return crypto.timingSafeEqual(hash, cand);
+  } catch {
+    return false;
+  }
+}
+
+function hasRead(req: Request): boolean {
+  const token = getBearer(req);
+  if (!token) return false;
+  return safeEqualAgainst(READ_KEY_HASH, token) || hasAdmin(req);
+}
+function hasExport(req: Request): boolean {
+  const token = getBearer(req);
+  if (!token) return false;
+  return safeEqualAgainst(EXPORT_KEY_HASH, token);
+}
+function hasAdmin(req: Request): boolean {
+  const token = getBearer(req);
+  if (!token) return false;
+  return (
+    safeEqualAgainst(ADMIN_KEY_HASH, token) ||
+    safeEqualAgainst(API_KEY_LEGACY_HASH, token) // migration
+  );
+}
+
+function respond401(res: Response) {
+  return res.status(401).json({ error: "Unauthorized" });
+}
+function respond403(res: Response, want: "read" | "export" | "admin") {
+  return res.status(403).json({
+    error: "Forbidden",
+    hint: `This operation requires ${want} key. Check your Authorization: Bearer <token>.`,
+  });
+}
 
 /* ===== Middlewares ===== */
 
-/**
- * CORS: 厳密一致
- * - 許可Origin：UI_ORIGIN（例: https://im-github.github.io）に完全一致のみ
- * - 許可メソッド：GET, POST, OPTIONS（最小）
- * - 許可ヘッダ：Authorization, Content-Type（最小）
- * - Access-Control-Allow-Credentials は付与しない（デフォルト: false）
- * - Origin ヘッダ無し（サーバ間アクセス等）は CORS ヘッダを付けない（通常応答）
- */
 const corsOptions: CorsOptions = {
   origin: (origin, callback) => {
-    // ブラウザ以外（Originなし）はCORS不要なのでヘッダ付けない
     if (!origin) return callback(null, false);
     if (origin === UI_ORIGIN) return callback(null, true);
     return callback(null, false);
   },
-  methods: ["GET", "POST", "OPTIONS"],
+  methods: ["GET", "POST", "PATCH", "DELETE", "OPTIONS"], // PATCH/DELETE追加
   allowedHeaders: ["Authorization", "Content-Type"],
   optionsSuccessStatus: 204,
   maxAge: 600,
@@ -59,14 +127,25 @@ app.use((req: Request, _res: Response, next: NextFunction) => {
   next();
 });
 
-// Auth (Bearer)
-function requireAuth(req: Request, res: Response, next: NextFunction) {
-  const h = req.header("authorization") || "";
-  const m = h.match(/^Bearer\s+(.+)$/i);
-  if (!m || m[1] !== API_KEY) {
-    return res.status(401).json({ error: "Unauthorized" });
-  }
-  next();
+// New auth middlewares
+function requireReadOrAdmin(req: Request, res: Response, next: NextFunction) {
+  const token = getBearer(req);
+  if (!token) return respond401(res);
+  if (hasRead(req)) return next();
+  // token was present but wrong kind
+  return respond403(res, "read");
+}
+function requireExport(req: Request, res: Response, next: NextFunction) {
+  const token = getBearer(req);
+  if (!token) return respond401(res);
+  if (hasExport(req)) return next();
+  return respond403(res, "export");
+}
+function requireAdmin(req: Request, res: Response, next: NextFunction) {
+  const token = getBearer(req);
+  if (!token) return respond401(res);
+  if (hasAdmin(req)) return next();
+  return respond403(res, "admin");
 }
 
 /* ===== Helpers ===== */
@@ -76,9 +155,7 @@ function normalizeTags(input: any): string[] {
   const cleaned = input
     .map((x) => (typeof x === "string" ? x.trim() : ""))
     .filter((x) => x.length > 0)
-    // 全角英数→半角
     .map((x) => x.replace(/[\uFF01-\uFF5E]/g, (ch) => String.fromCharCode(ch.charCodeAt(0) - 0xFEE0)))
-    // 英数のみは小文字化
     .map((x) => (/^[A-Za-z0-9]+$/.test(x) ? x.toLowerCase() : x));
   return Array.from(new Set(cleaned));
 }
@@ -95,8 +172,7 @@ function parseOrder(raw: any): "asc" | "desc" {
 }
 
 function parseOrderBy(raw: any): "id" | "created_at" | "updated_at" {
-  const v = (typeof raw === "string" ? raw.toLowerCase() : "") as
-    | "id" | "created_at" | "updated_at";
+  const v = (typeof raw === "string" ? raw.toLowerCase() : "") as "id" | "created_at" | "updated_at";
   return v === "created_at" || v === "updated_at" ? v : "id";
 }
 
@@ -348,7 +424,7 @@ app.get("/_status", async (_req, res) => {
 /* ===== Notes: list / count / export ===== */
 
 // GET /notes
-app.get("/notes", requireAuth, async (req, res) => {
+app.get("/notes", requireReadOrAdmin, async (req, res) => {
   try {
     const orderBy = parseOrderBy(req.query.order_by);
     const order = parseOrder(req.query.order);
@@ -480,7 +556,7 @@ app.get("/notes", requireAuth, async (req, res) => {
 });
 
 // GET /notes/count
-app.get("/notes/count", requireAuth, async (req, res) => {
+app.get("/notes/count", requireReadOrAdmin, async (req, res) => {
   try {
     const built = buildNotesFilters(req);
     if ("error" in built) return res.status(400).json({ error: built.error });
@@ -496,8 +572,16 @@ app.get("/notes/count", requireAuth, async (req, res) => {
   }
 });
 
-// GET /notes/export.csv
-app.get("/notes/export.csv", requireAuth, async (req, res) => {
+// GET /export.csv  (canonical)
+app.get("/export.csv", requireExport, async (req, res) => {
+  await handleExportCsv(req, res);
+});
+// Back-compat alias: GET /notes/export.csv
+app.get("/notes/export.csv", requireExport, async (req, res) => {
+  await handleExportCsv(req, res);
+});
+
+async function handleExportCsv(req: Request, res: Response) {
   try {
     const orderBy = parseOrderBy(req.query.order_by);
     const order = parseOrder(req.query.order);
@@ -585,11 +669,11 @@ app.get("/notes/export.csv", requireAuth, async (req, res) => {
     console.error(e);
     res.status(500).json({ error: "Internal Server Error" });
   }
-});
+}
 
 /* ===== CRUD ===== */
 
-app.post("/notes", requireAuth, async (req, res) => {
+app.post("/notes", requireAdmin, async (req, res) => {
   try {
     const c = validateContent(req.body?.content);
     if (!c.ok) return res.status(400).json({ error: c.error });
@@ -609,7 +693,7 @@ app.post("/notes", requireAuth, async (req, res) => {
   }
 });
 
-app.patch("/notes/:id", requireAuth, async (req, res) => {
+app.patch("/notes/:id", requireAdmin, async (req, res) => {
   try {
     const id = Number(req.params.id);
     if (!Number.isInteger(id) || id <= 0) return res.status(400).json({ error: "invalid id" });
@@ -646,7 +730,7 @@ app.patch("/notes/:id", requireAuth, async (req, res) => {
   }
 });
 
-app.delete("/notes/:id", requireAuth, async (req, res) => {
+app.delete("/notes/:id", requireAdmin, async (req, res) => {
   try {
     const id = Number(req.params.id);
     if (!Number.isInteger(id) || id <= 0) return res.status(400).json({ error: "invalid id" });
