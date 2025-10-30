@@ -49,4 +49,4 @@ jobs:
         run: |
           TODAY=$(date +%Y%m%d)
           rclone copy "backup_${TODAY}.zip" "gdrive:${DRIVE_DIR}/" \
-            --create-dirs --transfers=1 --checkers=2 --retries=3 --low-level-retries=5 --stats=10s
+            --transfers=1 --checkers=2 --retries=3 --low-level-retries=5 --stats=10s
