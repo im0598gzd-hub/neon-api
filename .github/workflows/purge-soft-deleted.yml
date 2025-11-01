@@ -2,49 +2,43 @@ name: Purge soft-deleted notes
 
 on:
   schedule:
-    # 毎日 18:30 UTC = 日本時間 03:30
-    - cron: "30 18 * * *"
-  workflow_dispatch: {} # 手動実行も可
+    # 毎日 18:30 UTC（JST 03:30）
+    - cron: '30 18 * * *'
+  workflow_dispatch:
 
 jobs:
   purge:
     runs-on: ubuntu-latest
     env:
       DATABASE_URL: ${{ secrets.DATABASE_URL }}
-      RETAIN_DAYS: "30"          # 保持日数（必要ならここだけ変更）
+      RETAIN_DAYS: '30' # 必要ならここだけ変更
 
     steps:
       - name: Install PostgreSQL client
-        run: sudo apt-get update && sudo apt-get install -y postgresql-client
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y postgresql-client
 
       - name: Dry-run (count targets)
-        run: |
-          psql "$DATABASE_URL" -Atc "
-            SELECT COUNT(*) 
-            FROM notes 
-            WHERE deleted_at IS NOT NULL 
-              AND deleted_at < (NOW() - INTERVAL '${RETAIN_DAYS} days');
-          " | sed 's/^/will_delete_count=/' >> $GITHUB_OUTPUT
         id: dry
+        shell: bash
+        run: |
+          COUNT=$(psql "$DATABASE_URL" -Atc \
+            "SELECT COUNT(*) FROM notes
+             WHERE deleted_at IS NOT NULL
+               AND deleted_at < (NOW() - INTERVAL '${RETAIN_DAYS} days')")
+          echo "will_delete_count=$COUNT" >> "$GITHUB_OUTPUT"
 
       - name: Log dry-run result
         run: echo "Soft-deleted records older than ${RETAIN_DAYS} days: ${{ steps.dry.outputs.will_delete_count }}"
 
       - name: Purge old soft-deleted notes (hard delete)
         if: ${{ steps.dry.outputs.will_delete_count != '0' }}
+        shell: bash
+        env:
+          PGOPTIONS: '-c client_min_messages=warning'
         run: |
-          psql "$DATABASE_URL" -Atc "
-            WITH del AS (
-              DELETE FROM notes
-              WHERE deleted_at IS NOT NULL
-                AND deleted_at < (NOW() - INTERVAL '${RETAIN_DAYS} days')
-              RETURNING 1
-            )
-            SELECT COUNT(*) FROM del;
-          " | sed 's/^/deleted_count=/' >> $GITHUB_OUTPUT
-        id: purge
-
-      - name: Summary
-        run: |
-          echo "Retain days : ${RETAIN_DAYS}"
-          echo "Deleted     : ${{ steps.purge.outputs.deleted_count || '0' }}"
+          psql "$DATABASE_URL" -v "ON_ERROR_STOP=1" -c \
+            "DELETE FROM notes
+             WHERE deleted_at IS NOT NULL
+               AND deleted_at < (NOW() - INTERVAL '${RETAIN_DAYS} days');"
