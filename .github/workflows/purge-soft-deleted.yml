@@ -1,9 +1,8 @@
-name: Purge soft-deleted notes
+name: purge-soft-deleted
 
 on:
   schedule:
-    # 毎日 18:30 UTC（JST 03:30）
-    - cron: '30 18 * * *'
+    - cron: '30 18 * * *'   # UTC 18:30 (JST 03:30)
   workflow_dispatch:
 
 jobs:
@@ -11,34 +10,32 @@ jobs:
     runs-on: ubuntu-latest
     env:
       DATABASE_URL: ${{ secrets.DATABASE_URL }}
-      RETAIN_DAYS: '30' # 必要ならここだけ変更
+      RETAIN_DAYS: '30'
 
     steps:
-      - name: Install PostgreSQL client
+      - uses: actions/checkout@v4
+
+      - name: Install psql
         run: |
           sudo apt-get update
           sudo apt-get install -y postgresql-client
 
-      - name: Dry-run (count targets)
+      - name: Dry run
         id: dry
         shell: bash
         run: |
-          COUNT=$(psql "$DATABASE_URL" -Atc \
-            "SELECT COUNT(*) FROM notes
-             WHERE deleted_at IS NOT NULL
-               AND deleted_at < (NOW() - INTERVAL '${RETAIN_DAYS} days')")
+          COUNT=$(psql "$DATABASE_URL" -Atc "SELECT COUNT(*) FROM notes
+            WHERE deleted_at IS NOT NULL
+              AND deleted_at < (NOW() - INTERVAL '${RETAIN_DAYS} days')")
           echo "will_delete_count=$COUNT" >> "$GITHUB_OUTPUT"
 
-      - name: Log dry-run result
-        run: echo "Soft-deleted records older than ${RETAIN_DAYS} days: ${{ steps.dry.outputs.will_delete_count }}"
+      - name: Log count
+        run: echo "count=${{ steps.dry.outputs.will_delete_count }}"
 
-      - name: Purge old soft-deleted notes (hard delete)
+      - name: Purge
         if: ${{ steps.dry.outputs.will_delete_count != '0' }}
         shell: bash
-        env:
-          PGOPTIONS: '-c client_min_messages=warning'
         run: |
-          psql "$DATABASE_URL" -v "ON_ERROR_STOP=1" -c \
-            "DELETE FROM notes
-             WHERE deleted_at IS NOT NULL
-               AND deleted_at < (NOW() - INTERVAL '${RETAIN_DAYS} days');"
+          psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -c "DELETE FROM notes
+            WHERE deleted_at IS NOT NULL
+              AND deleted_at < (NOW() - INTERVAL '${RETAIN_DAYS} days')"
