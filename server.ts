@@ -155,7 +155,9 @@ function normalizeTags(input: any): string[] {
   const cleaned = input
     .map((x) => (typeof x === "string" ? x.trim() : ""))
     .filter((x) => x.length > 0)
-    .map((x) => x.replace(/[\uFF01-\uFF5E]/g, (ch) => String.fromCharCode(ch.charCodeAt(0) - 0xFEE0)))
+    .map((x) =>
+      x.replace(/[\uFF01-\uFF5E]/g, (ch) => String.fromCharCode(ch.charCodeAt(0) - 0xFEE0))
+    )
     .map((x) => (/^[A-Za-z0-9]+$/.test(x) ? x.toLowerCase() : x));
   return Array.from(new Set(cleaned));
 }
@@ -199,6 +201,16 @@ function decodeCursor(raw: any): { created_at: string; id: number } | null {
   } catch {
     return null;
   }
+}
+
+/* ===== NEW: soft delete helpers ===== */
+
+function includeDeleted(req: Request): boolean {
+  // 管理者だけ include_deleted=true を許可
+  const flag =
+    typeof req.query.include_deleted === "string" &&
+    req.query.include_deleted.toLowerCase() === "true";
+  return flag && hasAdmin(req);
 }
 
 /* ===== Validation ===== */
@@ -269,6 +281,11 @@ function buildNotesFilters(req: Request) {
 
   const whereParts: string[] = [];
   const values: any[] = [];
+
+  // >>> NEW: default filter (soft delete) <<<
+  if (!includeDeleted(req)) {
+    whereParts.push("deleted_at IS NULL");
+  }
 
   if (q) {
     if (q_mode === "exact") {
@@ -432,9 +449,10 @@ app.get("/notes", requireReadOrAdmin, async (req, res) => {
       100,
       Math.max(1, Number.isFinite(Number(req.query.limit)) ? Number(req.query.limit) : 50)
     );
-    const offset = Number.isFinite(Number(req.query.offset)) && Number(req.query.offset) >= 0
-      ? Number(req.query.offset)
-      : 0;
+    const offset =
+      Number.isFinite(Number(req.query.offset)) && Number(req.query.offset) >= 0
+        ? Number(req.query.offset)
+        : 0;
     const cursor = decodeCursor(req.query.cursor);
     const wantRank =
       String(req.query.rank ?? "").toLowerCase() === "1" ||
@@ -491,8 +509,10 @@ app.get("/notes", requireReadOrAdmin, async (req, res) => {
 
     const cols =
       wantRank && !rankDisabled && built.q
-        ? `id, content, tags, created_at, updated_at, similarity(content, $${values.push(built.q)}) as _rank`
-        : `id, content, tags, created_at, updated_at`;
+        ? `id, content, tags, created_at, updated_at, deleted_at, similarity(content, $${values.push(
+            built.q
+          )}) as _rank`
+        : `id, content, tags, created_at, updated_at, deleted_at`;
 
     const limitParam = `$${values.push(limit)}`;
     const offsetSql = cursor || offset === 0 ? "" : ` offset $${values.push(offset)}`;
@@ -625,18 +645,48 @@ async function handleExportCsv(req: Request, res: Response) {
         ? `ORDER BY updated_at ${order}, id ${order}`
         : `ORDER BY id ${order}`;
 
+    // include_deleted=true（管理者のみ）のときだけ、CSVに deleted_at を追加で出せるようにする
+    const includeDel = includeDeleted(req);
     const colsBase = `
       id,
       content,
       tags,
       to_char((created_at at time zone 'Asia/Tokyo'), 'YYYY/MM/DD HH24:MI:SS') as created_at_jst,
-      to_char((updated_at at time zone 'Asia/Tokyo'), 'YYYY/MM/DD HH24:MI:SS') as updated_at_jst
+      to_char((updated_at  at time zone 'Asia/Tokyo'), 'YYYY/MM/DD HH24:MI:SS') as updated_at_jst
+    `;
+    const colsWithDeleted = `
+      ${colsBase},
+      ${includeDel ? "to_char((deleted_at at time zone 'Asia/Tokyo'), 'YYYY/MM/DD HH24:MI:SS') as deleted_at_jst," : ""}
+      ${includeDel && wantRank && !rankDisabled && built.q ? "similarity(content, $X) as _rank" : ""}
     `;
 
-    const cols =
-      wantRank && !rankDisabled && built.q
-        ? `${colsBase}, similarity(content, $${values.push(built.q)}) as _rank`
-        : colsBase;
+    let cols: string;
+    const values2: any[] = [...values];
+    if (wantRank && !rankDisabled && built.q) {
+      // 注意：同じクエリ内で built.q を複数回使うため、$番号を揃える
+      const qi = values2.push(built.q);
+      cols =
+        includeDel
+          ? `id, content, tags,
+             to_char((created_at at time zone 'Asia/Tokyo'), 'YYYY/MM/DD HH24:MI:SS') as created_at_jst,
+             to_char((updated_at  at time zone 'Asia/Tokyo'), 'YYYY/MM/DD HH24:MI:SS') as updated_at_jst,
+             to_char((deleted_at at time zone 'Asia/Tokyo'), 'YYYY/MM/DD HH24:MI:SS') as deleted_at_jst,
+             similarity(content, $${qi}) as _rank`
+          : `id, content, tags,
+             to_char((created_at at time zone 'Asia/Tokyo'), 'YYYY/MM/DD HH24:MI:SS') as created_at_jst,
+             to_char((updated_at  at time zone 'Asia/Tokyo'), 'YYYY/MM/DD HH24:MI:SS') as updated_at_jst,
+             similarity(content, $${qi}) as _rank`;
+    } else {
+      cols =
+        includeDel
+          ? `id, content, tags,
+             to_char((created_at at time zone 'Asia/Tokyo'), 'YYYY/MM/DD HH24:MI:SS') as created_at_jst,
+             to_char((updated_at  at time zone 'Asia/Tokyo'), 'YYYY/MM/DD HH24:MI:SS') as updated_at_jst,
+             to_char((deleted_at at time zone 'Asia/Tokyo'), 'YYYY/MM/DD HH24:MI:SS') as deleted_at_jst`
+          : `id, content, tags,
+             to_char((created_at at time zone 'Asia/Tokyo'), 'YYYY/MM/DD HH24:MI:SS') as created_at_jst,
+             to_char((updated_at  at time zone 'Asia/Tokyo'), 'YYYY/MM/DD HH24:MI:SS') as updated_at_jst`;
+    }
 
     const rows: any = await sql(
       `
@@ -644,13 +694,20 @@ async function handleExportCsv(req: Request, res: Response) {
       from notes
       ${whereClause}
       ${orderClause}
-      limit $${values.push(limit)}
+      limit $${values2.push(limit)}
     `,
-      values
+      values2
     );
 
     const headerAlways = ["id", "content", "tags", "created_at_jst", "updated_at_jst"];
-    const header = wantRank && !rankDisabled && built.q ? [...headerAlways, "_rank"] : headerAlways;
+    const header =
+      includeDel && wantRank && !rankDisabled && built.q
+        ? [...headerAlways, "deleted_at_jst", "_rank"]
+        : includeDel
+        ? [...headerAlways, "deleted_at_jst"]
+        : wantRank && !rankDisabled && built.q
+        ? [...headerAlways, "_rank"]
+        : headerAlways;
 
     const escape = (s: any) => {
       const v = s === null || s === undefined ? "" : String(s);
@@ -684,7 +741,7 @@ app.post("/notes", requireAdmin, async (req, res) => {
     const rows: any = await sql`
       insert into notes (content, tags)
       values (${c.value}, ${t.value})
-      returning id, content, tags, created_at, updated_at
+      returning id, content, tags, created_at, updated_at, deleted_at
     `;
     res.status(201).json(rows[0]);
   } catch (e) {
@@ -718,8 +775,8 @@ app.patch("/notes/:id", requireAdmin, async (req, res) => {
     const query = `
       update notes
       set ${setParts.join(", ")}, updated_at = now()
-      where id = $${values.length + 1}
-      returning id, content, tags, created_at, updated_at
+      where id = $${values.length + 1} and (deleted_at is null)
+      returning id, content, tags, created_at, updated_at, deleted_at
     `;
     const rows: any = await sql(query, [...values, id]);
     if (!rows || rows.length === 0) return res.status(404).json({ error: "not found" });
@@ -730,13 +787,42 @@ app.patch("/notes/:id", requireAdmin, async (req, res) => {
   }
 });
 
+// >>> NEW: DELETE = logical delete (soft)
 app.delete("/notes/:id", requireAdmin, async (req, res) => {
   try {
     const id = Number(req.params.id);
     if (!Number.isInteger(id) || id <= 0) return res.status(400).json({ error: "invalid id" });
-    const rows: any = await sql`delete from notes where id = ${id} returning id`;
+
+    const rows: any = await sql`
+      update notes
+      set deleted_at = now(), updated_at = now()
+      where id = ${id} and deleted_at is null
+      returning id
+    `;
     if (!rows || rows.length === 0) return res.status(404).json({ error: "not found" });
+    console.log(`[soft-delete] id=${id}`);
     res.status(204).send();
+  } catch (e) {
+    console.error(e);
+    res.status(500).json({ error: "Internal Server Error" });
+  }
+});
+
+// >>> NEW: RESTORE endpoint
+app.post("/notes/:id/restore", requireAdmin, async (req, res) => {
+  try {
+    const id = Number(req.params.id);
+    if (!Number.isInteger(id) || id <= 0) return res.status(400).json({ error: "invalid id" });
+
+    const rows: any = await sql`
+      update notes
+      set deleted_at = null, updated_at = now()
+      where id = ${id} and deleted_at is not null
+      returning id, content, tags, created_at, updated_at, deleted_at
+    `;
+    if (!rows || rows.length === 0) return res.status(404).json({ error: "not found" });
+    console.log(`[restore] id=${id}`);
+    res.json(rows[0]);
   } catch (e) {
     console.error(e);
     res.status(500).json({ error: "Internal Server Error" });
