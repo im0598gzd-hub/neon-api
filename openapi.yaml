@@ -1,219 +1,339 @@
-openapi: 3.1.0
+openapi: 3.0.3
 info:
-  title: Neon Notes API
-  version: '1.0.0'
+  title: neon-api (vA6)
+  description: >
+    GitHub Pages（UI）× Render（API）で動く最小API。  
+    **三鍵分離**（READ / EXPORT / ADMIN）に対応。  
+    - READ: /notes の閲覧・検索  
+    - EXPORT: /notes/export.csv のCSV出力のみ  
+    - ADMIN: /notes の投稿・更新・削除・復元  
+    **重要**: /notes/export.csv は EXPORT 専用（ADMIN は不可）。  
+    `include_deleted=true` は ADMIN のときだけ有効だが、CSVでは現状無効（仕様どおり）。
+  version: "vA6"
 servers:
   - url: https://neon-api-3a0h.onrender.com
+    description: Render (production)
+
+tags:
+  - name: Public
+  - name: Notes
+  - name: Export
+  - name: Admin
 
 components:
   securitySchemes:
-    bearerAuth:
+    BearerAuth:
       type: http
       scheme: bearer
-      bearerFormat: API_KEY
-
+      bearerFormat: JWT
   schemas:
     Note:
       type: object
       properties:
-        id: { type: integer }
-        content: { type: string }
+        id: { type: integer, example: 217 }
+        content: { type: string, example: "テスト用のノート" }
         tags:
           type: array
           items: { type: string }
-        created_at:
+          example: ["project","idea"]
+        created_at: { type: string, format: date-time }
+        updated_at: { type: string, format: date-time }
+        deleted_at:
           type: string
           format: date-time
-          description: UTCで保存（ChatGPT表示時にJSTへ変換）
-        updated_at:
-          type: [string, "null"]
-          format: date-time
-          description: UTCで保存（ChatGPT表示時にJSTへ変換）
-        _rank:
-          type: number
-          description: pg_trgm similarity（`rank=1`時のみ出現）
-          example: 0.82
-      additionalProperties: false
-
-    ZeroResultMessage:
+          nullable: true
+    ZeroResult:
       type: object
       properties:
-        results:
-          type: array
-          items: {}
-          example: []
-        message:
-          type: string
-          example: 一致するノートは見つかりませんでした。
+        results: { type: array, items: { } }
+        message: { type: string, example: "一致するノートは見つかりませんでした。" }
         tips:
           type: array
           items: { type: string }
-          example:
-            - キーワードを短くする（例：「テスト」→「テス」）
-            - rank_min を下げて再検索（例：0.5 → 0.3）
-            - 別の表記・同義語を試す（例：表記ゆれ・カナ/漢字）
         echo:
           type: object
-          properties:
-            q: { type: [string, "null"] }
-            rank_min: { type: [number, "null"] }
-            limit: { type: integer }
-            order_by: { type: string }
-      required: [results, message]
+          additionalProperties: true
+        friendly_text: { type: string }
+    CountResponse:
+      type: object
+      properties:
+        total: { type: integer, example: 42 }
 
   parameters:
     Q:
+      in: query
       name: q
-      in: query
       schema: { type: string }
-      description: 検索キーワード。`q_mode=trgm` で pg_trgm 使用（3文字未満は自動無効化）
+      description: 本文検索キーワード（部分一致/類似検索に対応）
     QMode:
-      name: q_mode
       in: query
+      name: q_mode
       schema:
         type: string
         enum: [exact, partial, trgm]
         default: partial
-      description: exact=完全一致 / partial=部分一致(ILIKE) / trgm=pg_trgm
-    Rank:
-      name: rank
+      description: >
+        exact=完全一致 / partial=部分一致 / trgm=類似検索（3文字以上）
+    TagsAll:
       in: query
-      schema: { type: string, enum: ["0","1","false","true"], default: "0" }
-      description: 1/true で `_rank` を返す（3文字未満は自動無効化）
-    RankMin:
-      name: rank_min
-      in: query
-      schema: { type: number }
-      description: `_rank` の下限（rank=1 かつ trgm 有効時のみ適用）
-    LimitSmall:
-      name: limit
-      in: query
-      schema: { type: integer, minimum: 1, maximum: 100, default: 50 }
-    LimitCsv:
-      name: limit
-      in: query
-      schema: { type: integer, minimum: 1, maximum: 10000, default: 1000 }
-    Offset:
-      name: offset
-      in: query
-      schema: { type: integer, minimum: 0 }
-    Cursor:
-      name: cursor
-      in: query
+      name: tags_all
       schema: { type: string }
-      description: `X-Next-Cursor` で返るカーソル文字列
-    OrderBy:
-      name: order_by
+      description: すべて含む（カンマ区切り）
+    TagsAny:
       in: query
+      name: tags_any
+      schema: { type: string }
+      description: いずれか含む（カンマ区切り）
+    TagsNone:
+      in: query
+      name: tags_none
+      schema: { type: string }
+      description: 含まない（カンマ区切り）
+    LegacyTags:
+      in: query
+      name: tags
+      schema: { type: string }
+      description: 旧式タグ指定（カンマ区切り）
+    LegacyTagsMode:
+      in: query
+      name: tags_mode
+      schema:
+        type: string
+        enum: [all, any]
+        default: all
+    From:
+      in: query
+      name: from
+      schema: { type: string, format: date-time }
+      description: 期間フィルタ（開始 ISO8601）
+    To:
+      in: query
+      name: to
+      schema: { type: string, format: date-time }
+      description: 期間フィルタ（終了 ISO8601）
+    OrderBy:
+      in: query
+      name: order_by
       schema:
         type: string
         enum: [id, created_at, updated_at]
         default: id
     Order:
-      name: order
       in: query
+      name: order
       schema:
         type: string
         enum: [asc, desc]
         default: desc
+    Limit:
+      in: query
+      name: limit
+      schema: { type: integer, minimum: 1, maximum: 100, default: 50 }
+    Offset:
+      in: query
+      name: offset
+      schema: { type: integer, minimum: 0, default: 0 }
+      description: カーソル方式使用時は通常未使用
+    Cursor:
+      in: query
+      name: cursor
+      schema: { type: string }
+      description: X-Next-Cursor をそのまま指定
+    Rank:
+      in: query
+      name: rank
+      schema:
+        oneOf:
+          - { type: string, enum: ["1","true"] }
+          - { type: integer, enum: [1] }
+      description: 類似度スコア列を付与（3文字以上のqで有効）
+    RankMin:
+      in: query
+      name: rank_min
+      schema: { type: number }
+      description: 類似度の下限（0.0〜1.0）
+    IncludeDeleted:
+      in: query
+      name: include_deleted
+      schema: { type: string, enum: ["true","false"], default: "false" }
+      description: 管理者（ADMIN）のみ有効。削除済みを含める。
+
+  responses:
+    Unauthorized:
+      description: 401 Unauthorized（Bearer 未付与）
+      content:
+        application/json:
+          schema:
+            type: object
+            properties:
+              error: { type: string, example: "Unauthorized" }
+    ForbiddenRead:
+      description: 403 Forbidden（READ が必要）
+      content:
+        application/json:
+          schema:
+            type: object
+            properties:
+              error: { type: string, example: "Forbidden" }
+              hint: { type: string, example: "This operation requires read key. Check your Authorization: Bearer <token>." }
+    ForbiddenExport:
+      description: 403 Forbidden（EXPORT が必要）
+      content:
+        application/json:
+          schema:
+            type: object
+            properties:
+              error: { type: string, example: "Forbidden" }
+              hint: { type: string, example: "This operation requires export key. Check your Authorization: Bearer <token>." }
+    ForbiddenAdmin:
+      description: 403 Forbidden（ADMIN が必要）
+      content:
+        application/json:
+          schema:
+            type: object
+            properties:
+              error: { type: string, example: "Forbidden" }
+              hint: { type: string, example: "This operation requires admin key. Check your Authorization: Bearer <token>." }
 
 paths:
   /health:
     get:
-      operationId: get_health
-      summary: Health check
+      tags: [Public]
+      summary: ヘルスチェック
+      security: []  # 公開
       responses:
-        '200':
+        "200":
           description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok: { type: boolean, example: true }
+
+  /_status:
+    get:
+      tags: [Public]
+      summary: アプリ・DBの簡易ステータス
+      security: []  # 公開
+      responses:
+        "200":
+          description: OK/NG
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  app: { type: string, example: "ok" }
+                  db: { type: string, example: "ok" }
+                  now: { type: string, format: date-time }
 
   /notes:
     get:
-      operationId: get_notes
-      summary: List notes (自然言語検索 + rank, rank_min, trgm 切替)
+      tags: [Notes]
+      summary: ノート一覧（READ または ADMIN）
       security:
-        - bearerAuth: []
+        - BearerAuth: []
       parameters:
-        - $ref: '#/components/parameters/Q'
-        - $ref: '#/components/parameters/QMode'
-        - $ref: '#/components/parameters/Rank'
-        - $ref: '#/components/parameters/RankMin'
-        - $ref: '#/components/parameters/LimitSmall'
-        - $ref: '#/components/parameters/Offset'
-        - $ref: '#/components/parameters/Cursor'
-        - $ref: '#/components/parameters/OrderBy'
-        - $ref: '#/components/parameters/Order'
+        - $ref: "#/components/parameters/Q"
+        - $ref: "#/components/parameters/QMode"
+        - $ref: "#/components/parameters/TagsAll"
+        - $ref: "#/components/parameters/TagsAny"
+        - $ref: "#/components/parameters/TagsNone"
+        - $ref: "#/components/parameters/LegacyTags"
+        - $ref: "#/components/parameters/LegacyTagsMode"
+        - $ref: "#/components/parameters/From"
+        - $ref: "#/components/parameters/To"
+        - $ref: "#/components/parameters/OrderBy"
+        - $ref: "#/components/parameters/Order"
+        - $ref: "#/components/parameters/Limit"
+        - $ref: "#/components/parameters/Offset"
+        - $ref: "#/components/parameters/Cursor"
+        - $ref: "#/components/parameters/Rank"
+        - $ref: "#/components/parameters/RankMin"
+        - $ref: "#/components/parameters/IncludeDeleted"
       responses:
-        '200':
-          description: 成功（ヒット時は Note[]、0件時はメッセージ形式）
+        "200":
+          description: 配列または0件メッセージ
           headers:
             X-Next-Cursor:
-              description: 満杯返却時の次ページ取得カーソル
+              description: 次ページ取得に使用（limit 到達時のみ付与）
               schema: { type: string }
             X-Rank-Disabled:
-              description: 3文字未満などでrankが無効化された場合に1
+              description: 3文字未満のq等でスコア無効時に"1"
               schema: { type: string, example: "1" }
           content:
             application/json:
-              oneOf:
-                - type: array
-                  items: { $ref: '#/components/schemas/Note' }
-                - $ref: '#/components/schemas/ZeroResultMessage'
-              examples:
-                hits:
-                  value:
-                    - id: 210
-                      content: これは全文検索テスト用のメモです
-                      tags: [demo]
-                      created_at: 2025-10-09T05:43:47.987Z
-                      updated_at: null
-                      _rank: 0.82
-                zero:
-                  value:
-                    results: []
-                    message: 一致するノートは見つかりませんでした。
-                    tips:
-                      - キーワードを短くする（例：「テスト」→「テス」）
-                      - rank_min を下げて再検索（例：0.5 → 0.3）
-                      - 別の表記・同義語を試す（例：表記ゆれ・カナ/漢字）
-                    echo:
-                      q: テスト
-                      rank_min: 0.5
-                      limit: 50
-                      order_by: rank_desc_id
+              schema:
+                oneOf:
+                  - type: array
+                    items: { $ref: "#/components/schemas/Note" }
+                  - $ref: "#/components/schemas/ZeroResult"
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/ForbiddenRead" }
 
     post:
-      operationId: post_notes
-      summary: Create a note
+      tags: [Admin]
+      summary: ノート作成（ADMIN）
       security:
-        - bearerAuth: []
+        - BearerAuth: []
       requestBody:
         required: true
         content:
           application/json:
             schema:
               type: object
-              required: [content]
+              required: [content, tags]
               properties:
-                content: { type: string }
+                content: { type: string, maxLength: 2000 }
                 tags:
                   type: array
                   items: { type: string }
+                  minItems: 1
+                  maxItems: 8
       responses:
-        '200':
-          description: Created
+        "201":
+          description: 作成成功
           content:
             application/json:
-              schema: { $ref: '#/components/schemas/Note' }
+              schema: { $ref: "#/components/schemas/Note" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/ForbiddenAdmin" }
+
+  /notes/count:
+    get:
+      tags: [Notes]
+      summary: 件数取得（READ または ADMIN）
+      security:
+        - BearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/Q"
+        - $ref: "#/components/parameters/QMode"
+        - $ref: "#/components/parameters/TagsAll"
+        - $ref: "#/components/parameters/TagsAny"
+        - $ref: "#/components/parameters/TagsNone"
+        - $ref: "#/components/parameters/LegacyTags"
+        - $ref: "#/components/parameters/LegacyTagsMode"
+        - $ref: "#/components/parameters/From"
+        - $ref: "#/components/parameters/To"
+      responses:
+        "200":
+          description: 合計件数
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/CountResponse" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/ForbiddenRead" }
 
   /notes/{id}:
     patch:
-      operationId: patch_notes_id
-      summary: Update a note
+      tags: [Admin]
+      summary: ノート更新（ADMIN、削除済みは不可）
       security:
-        - bearerAuth: []
+        - BearerAuth: []
       parameters:
-        - name: id
-          in: path
+        - in: path
+          name: id
           required: true
           schema: { type: integer }
       requestBody:
@@ -223,58 +343,124 @@ paths:
             schema:
               type: object
               properties:
-                content: { type: string }
+                content: { type: string, maxLength: 2000 }
                 tags:
                   type: array
                   items: { type: string }
+                  minItems: 1
+                  maxItems: 8
       responses:
-        '200':
-          description: Updated
+        "200":
+          description: 更新成功
           content:
             application/json:
-              schema: { $ref: '#/components/schemas/Note' }
+              schema: { $ref: "#/components/schemas/Note" }
+        "400":
+          description: リクエスト不正（内容なし等）
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/ForbiddenAdmin" }
+        "404":
+          description: 見つからない（削除済み or 不存在）
 
     delete:
-      operationId: delete_notes_id
-      summary: Delete a note
+      tags: [Admin]
+      summary: 論理削除（ADMIN）
       security:
-        - bearerAuth: []
+        - BearerAuth: []
       parameters:
-        - name: id
-          in: path
+        - in: path
+          name: id
           required: true
           schema: { type: integer }
       responses:
-        '204':
-          description: Deleted
+        "204":
+          description: 削除成功（本文なし）
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/ForbiddenAdmin" }
+        "404":
+          description: すでに削除済み/不存在
+
+  /notes/{id}/restore:
+    post:
+      tags: [Admin]
+      summary: 論理削除からの復元（ADMIN）
+      security:
+        - BearerAuth: []
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema: { type: integer }
+      responses:
+        "200":
+          description: 復元成功
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Note" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/ForbiddenAdmin" }
+        "404":
+          description: 削除されていない/不存在
 
   /notes/export.csv:
     get:
-      operationId: export_notes_csv
-      summary: CSV エクスポート（UTF-8+BOM / JST / rank_min 反映）
-      description: |
-        `rank=1` 指定時は `_rank` 列が追加されます。`X-Rank-Disabled: 1` の場合は `_rank` 列は出力されません。
+      tags: [Export]
+      summary: CSVエクスポート（**EXPORT 専用**）
+      description: >
+        現行仕様：EXPORT_KEY のみ許可。  
+        `include_deleted=true` は ADMIN の時だけ有効だが、本エンドポイントは ADMIN を許可しないため **無効**。
       security:
-        - bearerAuth: []
+        - BearerAuth: []
       parameters:
-        - $ref: '#/components/parameters/Q'
-        - $ref: '#/components/parameters/Rank'
-        - $ref: '#/components/parameters/RankMin'
-        - $ref: '#/components/parameters/LimitCsv'
+        - $ref: "#/components/parameters/Q"
+        - $ref: "#/components/parameters/QMode"
+        - $ref: "#/components/parameters/TagsAll"
+        - $ref: "#/components/parameters/TagsAny"
+        - $ref: "#/components/parameters/TagsNone"
+        - $ref: "#/components/parameters/LegacyTags"
+        - $ref: "#/components/parameters/LegacyTagsMode"
+        - $ref: "#/components/parameters/From"
+        - $ref: "#/components/parameters/To"
+        - $ref: "#/components/parameters/OrderBy"
+        - $ref: "#/components/parameters/Order"
+        - $ref: "#/components/parameters/Limit"
+        - $ref: "#/components/parameters/Rank"
+        - $ref: "#/components/parameters/RankMin"
+        - $ref: "#/components/parameters/IncludeDeleted"
       responses:
-        '200':
-          description: CSV bytes
+        "200":
+          description: CSV
           headers:
             X-Rank-Disabled:
-              description: 3文字未満などでrankが無効化された場合に1
+              description: 3文字未満のq等でスコア無効時に"1"
               schema: { type: string, example: "1" }
           content:
             text/csv:
               schema:
                 type: string
                 format: binary
-              examples:
-                head:
-                  summary: ヘッダ例
-                  value: |
-                    id,content,tags,created_at_jst,updated_at_jst
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/ForbiddenExport" }
+
+# 互換ルート（任意：残している場合のみ記述）
+  /export.csv:
+    get:
+      tags: [Export]
+      summary: 互換CSVエクスポート（将来非推奨予定）
+      description: 実体は /notes/export.csv と同じ。EXPORT 専用。
+      security:
+        - BearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/OrderBy"
+        - $ref: "#/components/parameters/Order"
+        - $ref: "#/components/parameters/Limit"
+      responses:
+        "200":
+          description: CSV
+          content:
+            text/csv:
+              schema:
+                type: string
+                format: binary
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/ForbiddenExport" }
