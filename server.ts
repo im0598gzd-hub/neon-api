@@ -62,7 +62,6 @@ function getBearer(req: Request): string | null {
 function safeEqualAgainst(hash: Buffer | null, candidate: string): boolean {
   if (!hash) return false;
   const cand = sha256Buf(candidate);
-  // same length by construction; timingSafeEqual requires same length buffers
   try {
     return crypto.timingSafeEqual(hash, cand);
   } catch {
@@ -107,7 +106,7 @@ const corsOptions: CorsOptions = {
     if (origin === UI_ORIGIN) return callback(null, true);
     return callback(null, false);
   },
-  methods: ["GET", "POST", "PATCH", "DELETE", "OPTIONS"], // PATCH/DELETE追加
+  methods: ["GET", "POST", "PATCH", "DELETE", "OPTIONS"],
   allowedHeaders: ["Authorization", "Content-Type"],
   optionsSuccessStatus: 204,
   maxAge: 600,
@@ -116,14 +115,11 @@ const corsOptions: CorsOptions = {
 app.use(cors(corsOptions));
 app.use(express.json({ limit: "1mb" }));
 
-// minimal audit log
+// minimal audit log（読みやすさのため簡潔化）
 app.use((req: Request, _res: Response, next: NextFunction) => {
-  const hasBody =
-    (req.headers["content-length"] && Number(req.headers["content-length"]) > 0) ||
-    (req as any).body
-      ? "yes"
-      : "no";
-  console.log(`[${new Date().toISOString()}] ${req.method} ${req.path} body:${hasBody}`);
+  const len = Number(req.headers["content-length"] || 0);
+  const hasBody = len > 0 || (req.body && typeof req.body === "object" && Object.keys(req.body).length > 0);
+  console.log(`[${new Date().toISOString()}] ${req.method} ${req.path} body:${hasBody ? "yes" : "no"}`);
   next();
 });
 
@@ -132,7 +128,6 @@ function requireReadOrAdmin(req: Request, res: Response, next: NextFunction) {
   const token = getBearer(req);
   if (!token) return respond401(res);
   if (hasRead(req)) return next();
-  // token was present but wrong kind
   return respond403(res, "read");
 }
 function requireExport(req: Request, res: Response, next: NextFunction) {
@@ -185,19 +180,35 @@ function parseIsoDate(raw: any): string | null {
   return d.toISOString();
 }
 
-function encodeCursor(created_at: string, id: number): string {
-  return Buffer.from(`${created_at}|${id}`, "utf8").toString("base64url");
+/* ===== Cursor helpers (v2: created_at|updated_at|id) with backward-compat ===== */
+
+function encodeCursor(created_at: string, updated_at: string, id: number): string {
+  return Buffer.from(`${created_at}|${updated_at}|${id}`, "utf8").toString("base64url");
 }
-function decodeCursor(raw: any): { created_at: string; id: number } | null {
+
+function decodeCursor(raw: any): { created_at: string; updated_at: string; id: number } | null {
   if (typeof raw !== "string" || raw.trim() === "") return null;
   try {
     const s = Buffer.from(raw, "base64url").toString("utf8");
-    const [c, i] = s.split("|");
-    const id = Number(i);
-    if (!c || !Number.isInteger(id)) return null;
-    const d = new Date(c);
-    if (isNaN(d.getTime())) return null;
-    return { created_at: d.toISOString(), id };
+    const parts = s.split("|");
+    if (parts.length === 3) {
+      const [c, u, iRaw] = parts;
+      const id = Number(iRaw);
+      const cDate = new Date(c);
+      const uDate = new Date(u);
+      if (!Number.isInteger(id) || isNaN(cDate.getTime()) || isNaN(uDate.getTime())) return null;
+      return { created_at: cDate.toISOString(), updated_at: uDate.toISOString(), id };
+    }
+    if (parts.length === 2) {
+      // v1 (backward compat): created_at|id
+      const [c, iRaw] = parts;
+      const id = Number(iRaw);
+      const cDate = new Date(c);
+      if (!Number.isInteger(id) || isNaN(cDate.getTime())) return null;
+      const iso = cDate.toISOString();
+      return { created_at: iso, updated_at: iso, id };
+    }
+    return null;
   } catch {
     return null;
   }
@@ -282,7 +293,7 @@ function buildNotesFilters(req: Request) {
   const whereParts: string[] = [];
   const values: any[] = [];
 
-  // >>> NEW: default filter (soft delete) <<<
+  // >>> default filter (soft delete) <<<
   if (!includeDeleted(req)) {
     whereParts.push("deleted_at IS NULL");
   }
@@ -481,6 +492,7 @@ app.get("/notes", requireReadOrAdmin, async (req, res) => {
       whereParts.push(`similarity(content, $${i}) >= $${j}`);
     }
 
+    // === Cursor (order_by-aware) ===
     if (cursor && !req.query.offset) {
       const cmp = order === "asc" ? ">" : "<";
       if (orderBy === "created_at") {
@@ -488,7 +500,7 @@ app.get("/notes", requireReadOrAdmin, async (req, res) => {
         const i2 = values.push(cursor.id);
         whereParts.push(`(created_at, id) ${cmp} ($${i1}::timestamptz, $${i2}::int)`);
       } else if (orderBy === "updated_at") {
-        const i1 = values.push(cursor.created_at);
+        const i1 = values.push(cursor.updated_at);
         const i2 = values.push(cursor.id);
         whereParts.push(`(updated_at, id) ${cmp} ($${i1}::timestamptz, $${i2}::int)`);
       } else {
@@ -565,7 +577,13 @@ app.get("/notes", requireReadOrAdmin, async (req, res) => {
 
     if (!req.query.offset && rows && rows.length === limit) {
       const last = rows[rows.length - 1];
-      res.setHeader("X-Next-Cursor", encodeCursor(last.created_at, last.id));
+      const cur =
+        orderBy === "updated_at"
+          ? encodeCursor(last.created_at, last.updated_at, last.id)
+          : orderBy === "created_at"
+          ? encodeCursor(last.created_at, last.updated_at, last.id)
+          : encodeCursor(last.created_at, last.updated_at, last.id);
+      res.setHeader("X-Next-Cursor", cur);
     }
 
     res.json(rows);
@@ -645,47 +663,28 @@ async function handleExportCsv(req: Request, res: Response) {
         ? `ORDER BY updated_at ${order}, id ${order}`
         : `ORDER BY id ${order}`;
 
-    // include_deleted=true（管理者のみ）のときだけ、CSVに deleted_at を追加で出せるようにする
+    // include_deleted=true（管理者のみ）のときだけ、CSVに deleted_at を追加
     const includeDel = includeDeleted(req);
-    const colsBase = `
+
+    // 列の組み立て（最小分岐）
+    const valsForCols: any[] = [];
+    let cols = `
       id,
       content,
       tags,
       to_char((created_at at time zone 'Asia/Tokyo'), 'YYYY/MM/DD HH24:MI:SS') as created_at_jst,
       to_char((updated_at  at time zone 'Asia/Tokyo'), 'YYYY/MM/DD HH24:MI:SS') as updated_at_jst
     `;
-    const colsWithDeleted = `
-      ${colsBase},
-      ${includeDel ? "to_char((deleted_at at time zone 'Asia/Tokyo'), 'YYYY/MM/DD HH24:MI:SS') as deleted_at_jst," : ""}
-      ${includeDel && wantRank && !rankDisabled && built.q ? "similarity(content, $X) as _rank" : ""}
-    `;
-
-    let cols: string;
-    const values2: any[] = [...values];
+    if (includeDel) {
+      cols += `,
+      to_char((deleted_at at time zone 'Asia/Tokyo'), 'YYYY/MM/DD HH24:MI:SS') as deleted_at_jst
+      `;
+    }
     if (wantRank && !rankDisabled && built.q) {
-      // 注意：同じクエリ内で built.q を複数回使うため、$番号を揃える
-      const qi = values2.push(built.q);
-      cols =
-        includeDel
-          ? `id, content, tags,
-             to_char((created_at at time zone 'Asia/Tokyo'), 'YYYY/MM/DD HH24:MI:SS') as created_at_jst,
-             to_char((updated_at  at time zone 'Asia/Tokyo'), 'YYYY/MM/DD HH24:MI:SS') as updated_at_jst,
-             to_char((deleted_at at time zone 'Asia/Tokyo'), 'YYYY/MM/DD HH24:MI:SS') as deleted_at_jst,
-             similarity(content, $${qi}) as _rank`
-          : `id, content, tags,
-             to_char((created_at at time zone 'Asia/Tokyo'), 'YYYY/MM/DD HH24:MI:SS') as created_at_jst,
-             to_char((updated_at  at time zone 'Asia/Tokyo'), 'YYYY/MM/DD HH24:MI:SS') as updated_at_jst,
-             similarity(content, $${qi}) as _rank`;
-    } else {
-      cols =
-        includeDel
-          ? `id, content, tags,
-             to_char((created_at at time zone 'Asia/Tokyo'), 'YYYY/MM/DD HH24:MI:SS') as created_at_jst,
-             to_char((updated_at  at time zone 'Asia/Tokyo'), 'YYYY/MM/DD HH24:MI:SS') as updated_at_jst,
-             to_char((deleted_at at time zone 'Asia/Tokyo'), 'YYYY/MM/DD HH24:MI:SS') as deleted_at_jst`
-          : `id, content, tags,
-             to_char((created_at at time zone 'Asia/Tokyo'), 'YYYY/MM/DD HH24:MI:SS') as created_at_jst,
-             to_char((updated_at  at time zone 'Asia/Tokyo'), 'YYYY/MM/DD HH24:MI:SS') as updated_at_jst`;
+      const qi = valsForCols.push(built.q);
+      cols += `,
+      similarity(content, $${qi}) as _rank
+      `;
     }
 
     const rows: any = await sql(
@@ -694,9 +693,9 @@ async function handleExportCsv(req: Request, res: Response) {
       from notes
       ${whereClause}
       ${orderClause}
-      limit $${values2.push(limit)}
+      limit $${[...values, ...valsForCols].length + 1}
     `,
-      values2
+      [...values, ...valsForCols, limit]
     );
 
     const headerAlways = ["id", "content", "tags", "created_at_jst", "updated_at_jst"];
@@ -787,7 +786,7 @@ app.patch("/notes/:id", requireAdmin, async (req, res) => {
   }
 });
 
-// >>> NEW: DELETE = logical delete (soft)
+// DELETE = logical delete (soft)
 app.delete("/notes/:id", requireAdmin, async (req, res) => {
   try {
     const id = Number(req.params.id);
@@ -808,7 +807,7 @@ app.delete("/notes/:id", requireAdmin, async (req, res) => {
   }
 });
 
-// >>> NEW: RESTORE endpoint
+// RESTORE endpoint
 app.post("/notes/:id/restore", requireAdmin, async (req, res) => {
   try {
     const id = Number(req.params.id);
