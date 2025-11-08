@@ -1,78 +1,112 @@
-# README_vA6_main — 運用版（完成形）
+README_vA6_main — 運用版（完成形）
 
----
+この文書は、vA6 システムを最短手順で再構築・運用するためのマニュアル である。
+思想・検証・背景は README_vA6_dev.md
+ に記録されている。
+本書では、実務に必要な「手順」「構造」「注意点」のみを記載する。
 
-## 第1章：目的と概要
-この文書は、vA6 システムを **最短手順で再構築・運用** するためのマニュアルである。  
-思想や試行記録は `README_vA6_dev.md` に記載されている。  
-本書では、実務に必要な「手順」「構造」「注意点」のみを記す。
+第1章：目的と概要
 
----
+目的：
 
-## 第2章：環境構成
+無料で常時稼働し続ける「自己修復型システム」を維持すること。
 
-| 層 | サービス | 役割 | 備考 |
-|----|-----------|------|------|
-| **Render** | Node.js | APIサーバ | /health, /notes, /export.csv |
-| **Neon** | PostgreSQL | データベース | PITR, スナップショット対応 |
-| **GitHub** | Actions + Pages | 自動バックアップ / UI配信 | Publicリポジトリで無料運用 |
-| **UptimeRobot** | 外部監視 | 常時稼働維持 | 15分間隔チェック |
+事故後でも30分以内（RTO）・1日以内（RPO）で完全復旧できること。
 
----
+対象読者：
 
-## 第3章：初期構築手順（5クリック＋数回コピペ）
+Render／Neon／GitHub／UptimeRobot を使用する管理者。
 
-1. **Render 環境を作成**  
-   - Node.js + TypeScript アプリをデプロイ  
-   - 環境変数：`READ_KEY` / `EXPORT_KEY` / `ADMIN_KEY` を設定  
+システム復旧・検証・メンテナンスを行う後継者。
 
-2. **Neon データベースを初期化**  
-   - `init.sql` を実行してスキーマ作成  
-   - PITR 有効化を確認  
+第2章：環境構成
+層	サービス	役割	備考
+Render	Node.js	APIサーバ	/health, /notes, /export.csv 常時稼働
+Neon	PostgreSQL	データベース	PITR・スナップショット対応
+GitHub	Actions + Pages	自動バックアップ／UI配信	Publicリポジトリで無料運用
+UptimeRobot	外部監視	常時稼働維持	15分間隔チェックでRender休眠防止
 
-3. **GitHub Actions を設定**  
-   - `.github/workflows/backup.yml` に /export.csv 自動バックアップを登録  
-   - `.github/workflows/health.yml` に /health チェックを登録  
+この4層をもって「クラウドオンリー構成」を実現し、
+ローカルPCが破損しても即復旧可能な体制を保つ。
 
-4. **UptimeRobot を設定**  
-   - 監視URLに Render の `/health` を登録  
-   - 15分間隔監視でスリープ防止  
+第3章：初期構築手順（5クリック＋数回コピペ）
 
-5. **Minimal Web UI を配信**  
-   - GitHub Pages を有効化  
-   - `UI_ORIGIN` を Pages URL に設定  
-   - `/notes` のCRUDが動作することを確認  
+1️⃣ Render 環境を作成し、/health 応答を確認（503→200へ）。
+2️⃣ GitHub Actions で /export.csv の自動バックアップを有効化。
+3️⃣ Neon のDB構造を初期化し、CSV復旧テストを実施。
+4️⃣ UptimeRobot を設定し、Render のスリープを防止。
+5️⃣ /notes CRUD 操作を確認し、UIから正常応答を検証。
 
----
+→ 以上5工程をもって「思想・設計・運用」が1点に収束する。
 
-## 第4章：運用ルールと点検
+第4章：監視・バックアップ・復旧確認
 
-| 項目 | 頻度 | 操作内容 |
-|------|------|----------|
-| **バックアップ確認** | 毎日自動（手動時はActionsログ確認） | `/export.csv` 正常出力を確認 |
-| **Neon PITR確認** | 月1回 | 復旧テスト（スナップショット復元） |
-| **UptimeRobot監視** | 常時 | ダウン検知後に自動再起動を確認 |
-| **README更新** | 必要時 | 設計変更・障害報告の反映 |
+vA6_main では「監視」と「バックアップ」を一体設計として扱う。
+Render・GitHub・Neon の3層を循環的に保守し、異常検知から自動復旧までを網羅する。
 
----
+4.1 自動監視構成
+監視層	ツール	対象API	動作
+外部監視	UptimeRobot	/health	15分間隔でPing監視。503応答時に自動再起動。
+内部監視	GitHub Actions	/export.csv	日次エクスポート＋Issue起票。バックアップ履歴を記録。
+4.2 復旧訓練（RTO／RPOドリル）
 
-## 第5章：復旧と引継ぎ
+RTO訓練：Render を強制停止→再起動までの時間を計測。
 
-- **障害時**：  
-  - Render 落ち → 自動再起動を待機（15〜30分以内）。  
-  - GitHub Actions 停止 → 再実行ボタンで復旧。  
-  - Neon 障害 → PITRまたはCSV復旧を利用。  
+RPO訓練：Neon のCSVバックアップを復旧し、差異を確認。
 
-- **引継ぎ時**：  
-  1. DEATH.md を参照。  
-  2. README_vA6_main → 実運用手順。  
-  3. README_vA6_dev → 構造・思想の理解。  
+訓練結果を /docs/backups/ に保存し、
+30分以内（RTO）・1日以内（RPO）を達成していることを確認する。
 
----
+4.3 人的操作ポイント（最小介入）
+対象	操作内容	頻度
+GitHub Actions	失敗時の再実行	必要時のみ
+Neon	月次バックアップ＋PITR確認	1回／月
+README更新	成果記録・方針転換	主要更新時のみ
 
-## 付録：参照リンク
+自動化の目的は「人が触れなくても壊れない」ことではなく、
+「人が触れても壊れない範囲に制御する」ことにある。
 
-- [README_vA6_dev.md](./README_vA6_dev.md)
-- [archive/README_vA4+.md](./archive/README_vA4+.md)
-- [archive/README_vA5.md](./archive/README_vA5.md)
-- [archive/README_vA5.1.md](./archive/README_vA5.1.md)
+第5章：凍結ポリシーと継承方針
+
+本書は vA6 系統の最終安定版 として位置づけられる。
+以降のバージョンは思想検証を目的とする別ブランチ（例：vA7_dev）にて実施する。
+
+5.1 凍結ポリシー
+
+vA6_main は「運用の安定版」として凍結。
+
+vA6_dev は「思想・検証の記録版」として保存。
+
+双方は相互参照可能な状態を維持し、混同を防ぐ。
+
+修正・機能追加は vA7 以降 にて分岐管理する。
+
+5.2 継承と再利用
+
+README_vA6_main.md は Render と直接同期可能な構成。
+
+Render 停止時も GitHub Pages で手順確認が可能。
+
+後継者は本書を「再構築用ドキュメント」として使用。
+
+付録：Quickガイド参照リンク
+
+初心者や再構築支援者向けに、
+より簡潔な手順書 README_vA6_quick.md を別途用意している。
+
+ファイル	内容	用途
+README_vA6_quick.md	初期構築・復旧・検証をまとめたクイックスタート版	Render同期時の参照
+README_vA6_dev.md	思想・検証・履歴記録	技術的背景の理解補助
+README_vA4+.md	旧Render同期版（archive予定）	移行後は参照のみ可
+
+運用中の更新方針：
+minor修正は Quick 版に反映し、main は変更せず保守的に維持する。
+
+🧩 最終確認表（安定稼働チェック）
+層	チェック項目	状態	確認日
+Render	/health が200応答する	✅	yyyy/mm/dd
+Neon	CSVエクスポート／復旧成功	✅	yyyy/mm/dd
+GitHub Actions	自動バックアップ実行・Issue正常	✅	yyyy/mm/dd
+UptimeRobot	外部監視が15分周期で動作	✅	yyyy/mm/dd
+
+この表は、運用者・後継者が日次／月次点検時に更新する。
