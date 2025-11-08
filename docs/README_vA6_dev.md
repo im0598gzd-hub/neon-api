@@ -35,9 +35,6 @@ AI・研究者はvA6_devを通じて思想と試行の変遷を追跡できる�
 ├── openapi.yaml ← ChatGPT Actions登録用仕様書
 └── structure_Aprime.md ← A′案構成図
 
-yaml
-コードをコピーする
-
 ---
 
 ### 🧭 vA6_dev の目的と位置づけ
