@@ -1,52 +1,69 @@
-README_vA6_quick.md
+# README_vA6_quick.md
+### — 導入・再構築クイックガイド（vA6環境）—
 
-— 導入・再構築用クイックガイド（vA6一発実装対応）—
+## 0. 目的
+この文書は、vA6システムを**最短手順で導入または再構築**するための実行マニュアルです。  
+コード内容の理解は不要です。手順を順に実行すれば、同一環境が再現されます。  
+開発や運用の詳細は `README_vA6_main.md` および `README_vA6_dev.md` を参照してください。
 
-0. 目的
+---
 
-この文書は、vA6 システムをゼロから導入・再構築するための
-最短マニュアルです。
-開発・運用・思想・検証の詳細は README_vA6_main.md および README_vA6_dev.md を参照。
+## 1. 構成概要
 
-1. 構成の全体像（理解）
+| コンポーネント | 役割 |
+|----------------|------|
+| **Render** | Node.js アプリ（APIサーバ） `/health`, `/notes`, `/export.csv` を提供 |
+| **Neon** | PostgreSQL データベース（`notes` テーブル保持） |
+| **GitHub** | コードと設定の管理 |
+| **UptimeRobot** | `/health` を監視し稼働状態を維持 |
 
-Render（Node.js／APIサーバ）
-　→ /health, /notes, /export.csv を提供する中心。
+---
 
-Neon（PostgreSQL／DB）
-　→ notes テーブルとログデータを保持。
+## 2. 導入手順
 
-GitHub（コード・設定・バックアップ）
-　→ Render・Neon構成をIaC（Infrastructure as Code）で管理。
+| 手順 | 操作内容 | 所要時間 |
+|------|-----------|-----------|
+| ① | GitHubで対象リポジトリを Fork またはクローン | 約30秒 |
+| ② | Renderで「New Web Service」→ GitHub連携 | 約1分 |
+| ③ | `.env` の環境変数を設定（5項目をコピー＆ペースト） | 約2分 |
+| ④ | Neonで新規DBを作成し、`init.sql` を実行 | 約1分 |
+| ⑤ | `/health` にアクセスし `{"ok":true}` を確認 | 約10秒 |
 
-UptimeRobot（監視）
-　→ /health を60秒ごとに監視し、Renderを常時稼働状態に保つ。
+**合計：約5分（5クリック＋数回コピペ）**
 
-2. 導入手順
-ステップ	操作	所要時間
-①	GitHubで Fork する（1クリック）	約30秒
-②	Renderで “New Web Service” → GitHub連携（2クリック）	約1分
-③	環境変数をコピー＆ペースト（5項目）	約2分
-④	Neonで DB作成 → init.sql を実行（1クリック＋1ペースト）	約1分
-⑤	/health にアクセスして {"ok":true} を確認	約10秒
+> ※ ChatGPT Plus や HTTP実行可能なAIを利用すれば、一部操作を自動化できます。
 
-合計：5クリック＋数回コピペで完了（所要約5分）
+---
 
-3. 動作確認
-項目	方法	正常時の挙動
-API応答	/health	{"ok":true}
-データ書込	/notes POST	データベース登録成功
-CSV出力	/export.csv	CSVが自動ダウンロード
-監視	UptimeRobot	ステータス 200（OK）を保持
-4. 関連ファイル
-ファイル	内容
-README_vA6_main.md	運用・設計・環境設定の正式手順
-README_vA6_dev.md	思想・経緯・試行記録
-archive/	旧版の完全保存群（vA4+〜vA5.1）
-init.sql	Neon DB初期化スクリプト
-openapi.yaml	ChatGPT Actions 登録用仕様書
-5. 補足（設計思想の要約）
+## 3. 動作確認
 
-「誰が導入しても、同じ形で動く」
-そのために、構成・変数・監視すべてをクラウドに固定した。
-この quick.md は、5クリックで“同じ環境”を再現できることを目的としている。
+| 確認項目 | URL / 方法 | 正常時の結果 |
+|-----------|-------------|----------------|
+| **API疎通** | `/health` | `{"ok":true}` が返る |
+| **データ登録** | `/notes` にPOST | データベース登録成功 |
+| **CSV出力** | `/export.csv` | CSVが自動ダウンロード |
+| **監視状態** | UptimeRobot | ステータス200を維持 |
+
+---
+
+## 4. 関連ファイル
+
+| ファイル | 内容 |
+|-----------|------|
+| `README_vA6_main.md` | 運用・設計・環境設定手順 |
+| `README_vA6_dev.md` | 開発・検証記録 |
+| `init.sql` | Neon DB初期化スクリプト |
+| `openapi.yaml` | ChatGPT Actions用仕様書 |
+| `archive/` | 旧版保存（vA4+〜vA5.1） |
+
+---
+
+## 5. 注意事項
+- Render・Neon・GitHub の各サービスはすべて無料枠で動作可能。  
+- `init.sql` 実行前に既存DBを削除する場合は、バックアップを取得すること。  
+- `.env` に含まれる認証情報は共有しない。  
+
+---
+
+### Update Log
+- **2025-11-12**：構成を導入手順のみに再編（実務版）
