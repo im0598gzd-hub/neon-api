@@ -35,7 +35,7 @@ for (const [name, value] of Object.entries(REQUIRED_ENV)) {
   }
 }
 
-// Warn for missing keys (don’t exit: “鍵すべて消去”のテストや段階導入に対応)
+// Warn for missing keys
 if (!READ_KEY_RAW) console.warn("[WARN] READ_KEY is empty (read endpoints will 401).");
 if (!EXPORT_KEY_RAW) console.warn("[WARN] EXPORT_KEY is empty (export endpoints will 401).");
 if (!ADMIN_KEY_RAW && !API_KEY_LEGACY) {
@@ -45,28 +45,26 @@ if (API_KEY_LEGACY) {
   console.warn("[MIGRATION] API_KEY is present. It will be accepted as ADMIN (temporary).");
 }
 
-// logging helper
 function log(...args: any[]) {
   console.log(new Date().toISOString(), "-", ...args);
 }
 
 const sql = neon(DATABASE_URL);
 
-/* ===== Types (for future safety) ===== */
+/* ===== Types ===== */
 
 interface Note {
   id: number;
   content: string;
   tags: string[];
-  created_at: string; // ISO
-  updated_at: string; // ISO
+  created_at: string;
+  updated_at: string;
   deleted_at: string | null;
 }
 
-/* ===== Security helpers (constant-time compare) ===== */
+/* ===== Security helpers ===== */
 
 function sha256Buf(s: string): Buffer {
-  // Hash to fixed-length buffer for timingSafeEqual
   return crypto.createHash("sha256").update(s, "utf8").digest();
 }
 const READ_KEY_HASH = READ_KEY_RAW ? sha256Buf(READ_KEY_RAW) : null;
@@ -90,7 +88,6 @@ function safeEqualAgainst(hash: Buffer | null, candidate: string): boolean {
   }
 }
 
-// 統一スコープ判定
 type Scope = "read" | "export" | "admin";
 
 function hasScope(req: Request, scope: Scope): boolean {
@@ -99,21 +96,19 @@ function hasScope(req: Request, scope: Scope): boolean {
 
   switch (scope) {
     case "read":
-      // READ or ADMIN
       return safeEqualAgainst(READ_KEY_HASH, token) || hasScope(req, "admin");
     case "export":
       return safeEqualAgainst(EXPORT_KEY_HASH, token);
     case "admin":
       return (
         safeEqualAgainst(ADMIN_KEY_HASH, token) ||
-        safeEqualAgainst(API_KEY_LEGACY_HASH, token) // migration
+        safeEqualAgainst(API_KEY_LEGACY_HASH, token)
       );
     default:
       return false;
   }
 }
 
-// 既存コード互換のラッパー
 function hasRead(req: Request): boolean {
   return hasScope(req, "read");
 }
@@ -136,15 +131,24 @@ function respond403(res: Response, want: Scope) {
 
 /* ===== Middlewares ===== */
 
+/*
+=======================================
+ CORS 設定 —— ★ここが修正ポイント（重要）
+=======================================
+*/
+
 const corsOptions: CorsOptions = {
   origin: (origin, callback) => {
     if (!origin) {
-      // ブラウザ以外（curl など）からのアクセスは CORS なしで来ることもあるので、
-      // 単に拒否しておく（エラーにはしない）
       log("[CORS] blocked request without Origin header");
       return callback(null, false);
     }
-    if (origin === UI_ORIGIN) return callback(null, true);
+
+    // GitHub Pages の https://username.github.io の下にページが存在する場合
+    // 完全一致しないため strict match だと弾かれる
+    if (origin.startsWith(UI_ORIGIN)) {
+      return callback(null, true);
+    }
 
     log("[CORS] blocked origin:", origin);
     return callback(null, false);
@@ -158,8 +162,8 @@ const corsOptions: CorsOptions = {
 app.use(cors(corsOptions));
 app.use(express.json({ limit: "1mb" }));
 
-// minimal audit log（読みやすさのため簡潔化）
-app.use((req: Request, _res: Response, next: NextFunction) => {
+// audit log
+app.use((req, _res, next) => {
   const len = Number(req.headers["content-length"] || 0);
   const hasBody =
     len > 0 || (req.body && typeof req.body === "object" && Object.keys(req.body).length > 0);
@@ -167,7 +171,8 @@ app.use((req: Request, _res: Response, next: NextFunction) => {
   next();
 });
 
-// New auth middlewares
+/* ===== Auth middlewares ===== */
+
 function requireReadOrAdmin(req: Request, res: Response, next: NextFunction) {
   const token = getBearer(req);
   if (!token) return respond401(res);
@@ -224,7 +229,7 @@ function parseIsoDate(raw: any): string | null {
   return d.toISOString();
 }
 
-/* ===== Cursor helpers (v2: created_at|updated_at|id) with backward-compat ===== */
+/* ===== Cursor helpers ===== */
 
 function encodeCursor(created_at: string, updated_at: string, id: number): string {
   return Buffer.from(`${created_at}|${updated_at}|${id}`, "utf8").toString("base64url");
@@ -244,7 +249,6 @@ function decodeCursor(raw: any): { created_at: string; updated_at: string; id: n
       return { created_at: cDate.toISOString(), updated_at: uDate.toISOString(), id };
     }
     if (parts.length === 2) {
-      // v1 (backward compat): created_at|id
       const [c, iRaw] = parts;
       const id = Number(iRaw);
       const cDate = new Date(c);
@@ -261,7 +265,6 @@ function decodeCursor(raw: any): { created_at: string; updated_at: string; id: n
 /* ===== NEW: soft delete helpers ===== */
 
 function includeDeleted(req: Request): boolean {
-  // 管理者だけ include_deleted=true を許可
   const flag =
     typeof req.query.include_deleted === "string" &&
     req.query.include_deleted.toLowerCase() === "true";
@@ -303,7 +306,7 @@ function validateTags(raw: any) {
   return { ok: true as const, value: tags };
 }
 
-/* ===== WHERE Builder ===== */
+/* ===== WHERE builder ===== */
 
 function buildNotesFilters(req: Request) {
   const qRaw = typeof req.query.q === "string" ? req.query.q.trim() : "";
@@ -315,7 +318,8 @@ function buildNotesFilters(req: Request) {
     qm === "exact" ? "exact" : qm === "trgm" ? "trgm" : "partial";
 
   const tagsMatch =
-    typeof req.query.tags_match === "string" && req.query.tags_match.toLowerCase() === "partial"
+    typeof req.query.tags_match === "string" &&
+    req.query.tags_match.toLowerCase() === "partial"
       ? "partial"
       : "exact";
   const tagsAll = parseTagsQuery(req.query.tags_all);
@@ -324,7 +328,8 @@ function buildNotesFilters(req: Request) {
 
   const legacyTags = parseTagsQuery(req.query.tags);
   const legacyMode =
-    typeof req.query.tags_mode === "string" && req.query.tags_mode.toLowerCase() === "any"
+    typeof req.query.tags_mode === "string" &&
+    req.query.tags_mode.toLowerCase() === "any"
       ? "any"
       : "all";
 
@@ -337,7 +342,6 @@ function buildNotesFilters(req: Request) {
   const whereParts: string[] = [];
   const values: any[] = [];
 
-  // default filter (soft delete)
   if (!includeDeleted(req)) {
     whereParts.push("deleted_at IS NULL");
   }
@@ -403,7 +407,7 @@ function buildNotesFilters(req: Request) {
   return { whereClause, values, q, qLen, q_mode } as const;
 }
 
-/* ===== tips builder (Zero result) ===== */
+/* ===== tips builder ===== */
 
 function buildZeroResultTips(opts: {
   q: string;
@@ -447,7 +451,8 @@ function buildZeroResultTips(opts: {
   return Array.from(new Set(tips)).slice(0, 5);
 }
 
-/* ===== NEW: 0件時メッセージ ===== */
+/* ===== ZERO result formatting ===== */
+
 function formatFriendlyTips(message: string, tips: string[], echo: any) {
   const q = (echo?.q ?? "").toString();
   const hint =
@@ -474,7 +479,7 @@ function formatFriendlyTips(message: string, tips: string[], echo: any) {
     .join("\n");
 }
 
-/* ===== Public ===== */
+/* ===== /health ===== */
 
 app.get("/health", (_req, res) => res.json({ ok: true }));
 
@@ -493,9 +498,8 @@ app.get("/_status", async (_req, res) => {
   }
 });
 
-/* ===== Notes: list / count / export ===== */
+/* ===== GET /notes ===== */
 
-// GET /notes
 app.get("/notes", requireReadOrAdmin, async (req, res) => {
   try {
     const orderBy = parseOrderBy(req.query.order_by);
@@ -536,7 +540,6 @@ app.get("/notes", requireReadOrAdmin, async (req, res) => {
       whereParts.push(`similarity(content, $${i}) >= $${j}`);
     }
 
-    // Cursor (order_by-aware)
     if (cursor && !req.query.offset) {
       const cmp = order === "asc" ? ">" : "<";
       if (orderBy === "created_at") {
@@ -632,7 +635,8 @@ app.get("/notes", requireReadOrAdmin, async (req, res) => {
   }
 });
 
-// GET /notes/count
+/* ===== GET /notes/count ===== */
+
 app.get("/notes/count", requireReadOrAdmin, async (req, res) => {
   try {
     const built = buildNotesFilters(req);
@@ -649,11 +653,11 @@ app.get("/notes/count", requireReadOrAdmin, async (req, res) => {
   }
 });
 
-// GET /export.csv  (canonical)
+/* ===== CSV Export ===== */
+
 app.get("/export.csv", requireExport, async (req, res) => {
   await handleExportCsv(req, res);
 });
-// Back-compat alias: GET /notes/export.csv
 app.get("/notes/export.csv", requireExport, async (req, res) => {
   await handleExportCsv(req, res);
 });
@@ -702,10 +706,8 @@ async function handleExportCsv(req: Request, res: Response) {
         ? `ORDER BY updated_at ${order}, id ${order}`
         : `ORDER BY id ${order}`;
 
-    // include_deleted=true（管理者のみ）のときだけ、CSVに deleted_at を追加
     const includeDel = includeDeleted(req);
 
-    // 列の組み立て（最小分岐）
     const valsForCols: any[] = [];
     let cols = `
       id,
@@ -766,7 +768,7 @@ async function handleExportCsv(req: Request, res: Response) {
   }
 }
 
-/* ===== CRUD ===== */
+/* ===== POST /notes ===== */
 
 app.post("/notes", requireAdmin, async (req, res) => {
   try {
@@ -787,6 +789,8 @@ app.post("/notes", requireAdmin, async (req, res) => {
     res.status(500).json({ error: "Internal Server Error" });
   }
 });
+
+/* ===== PATCH /notes/:id ===== */
 
 app.patch("/notes/:id", requireAdmin, async (req, res) => {
   try {
@@ -825,7 +829,8 @@ app.patch("/notes/:id", requireAdmin, async (req, res) => {
   }
 });
 
-// DELETE = logical delete (soft)
+/* ===== DELETE /notes/:id ===== */
+
 app.delete("/notes/:id", requireAdmin, async (req, res) => {
   try {
     const id = Number(req.params.id);
@@ -846,7 +851,8 @@ app.delete("/notes/:id", requireAdmin, async (req, res) => {
   }
 });
 
-// RESTORE endpoint
+/* ===== POST /notes/:id/restore ===== */
+
 app.post("/notes/:id/restore", requireAdmin, async (req, res) => {
   try {
     const id = Number(req.params.id);
@@ -868,6 +874,7 @@ app.post("/notes/:id/restore", requireAdmin, async (req, res) => {
 });
 
 /* ===== Listen ===== */
+
 app.listen(PORT, () => {
   log(`Server listening on :${PORT}`);
 });
