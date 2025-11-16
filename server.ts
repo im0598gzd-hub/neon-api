@@ -8,9 +8,10 @@ import crypto from "crypto";
 const app = express();
 
 /* ===== Runtime config ===== */
+
 const PORT = process.env.PORT || 3000;
 
-// New: three keys
+// three keys
 const READ_KEY_RAW = process.env.READ_KEY || "";
 const EXPORT_KEY_RAW = process.env.EXPORT_KEY || "";
 const ADMIN_KEY_RAW = process.env.ADMIN_KEY || "";
@@ -21,13 +22,17 @@ const API_KEY_LEGACY = process.env.API_KEY || "";
 const DATABASE_URL = process.env.DATABASE_URL || "";
 const UI_ORIGIN = process.env.UI_ORIGIN || ""; // strict match
 
-if (!DATABASE_URL) {
-  console.error("DATABASE_URL is not set");
-  process.exit(1);
-}
-if (!UI_ORIGIN) {
-  console.error("UI_ORIGIN is not set (example: https://im-github.github.io)");
-  process.exit(1);
+// 必須環境変数の一括チェック
+const REQUIRED_ENV: Record<string, string> = {
+  DATABASE_URL,
+  UI_ORIGIN,
+};
+
+for (const [name, value] of Object.entries(REQUIRED_ENV)) {
+  if (!value) {
+    console.error(`[FATAL] ${name} is not set`);
+    process.exit(1);
+  }
 }
 
 // Warn for missing keys (don’t exit: “鍵すべて消去”のテストや段階導入に対応)
@@ -40,7 +45,23 @@ if (API_KEY_LEGACY) {
   console.warn("[MIGRATION] API_KEY is present. It will be accepted as ADMIN (temporary).");
 }
 
+// logging helper
+function log(...args: any[]) {
+  console.log(new Date().toISOString(), "-", ...args);
+}
+
 const sql = neon(DATABASE_URL);
+
+/* ===== Types (for future safety) ===== */
+
+interface Note {
+  id: number;
+  content: string;
+  tags: string[];
+  created_at: string; // ISO
+  updated_at: string; // ISO
+  deleted_at: string | null;
+}
 
 /* ===== Security helpers (constant-time compare) ===== */
 
@@ -69,29 +90,44 @@ function safeEqualAgainst(hash: Buffer | null, candidate: string): boolean {
   }
 }
 
-function hasRead(req: Request): boolean {
+// 統一スコープ判定
+type Scope = "read" | "export" | "admin";
+
+function hasScope(req: Request, scope: Scope): boolean {
   const token = getBearer(req);
   if (!token) return false;
-  return safeEqualAgainst(READ_KEY_HASH, token) || hasAdmin(req);
+
+  switch (scope) {
+    case "read":
+      // READ or ADMIN
+      return safeEqualAgainst(READ_KEY_HASH, token) || hasScope(req, "admin");
+    case "export":
+      return safeEqualAgainst(EXPORT_KEY_HASH, token);
+    case "admin":
+      return (
+        safeEqualAgainst(ADMIN_KEY_HASH, token) ||
+        safeEqualAgainst(API_KEY_LEGACY_HASH, token) // migration
+      );
+    default:
+      return false;
+  }
+}
+
+// 既存コード互換のラッパー
+function hasRead(req: Request): boolean {
+  return hasScope(req, "read");
 }
 function hasExport(req: Request): boolean {
-  const token = getBearer(req);
-  if (!token) return false;
-  return safeEqualAgainst(EXPORT_KEY_HASH, token);
+  return hasScope(req, "export");
 }
 function hasAdmin(req: Request): boolean {
-  const token = getBearer(req);
-  if (!token) return false;
-  return (
-    safeEqualAgainst(ADMIN_KEY_HASH, token) ||
-    safeEqualAgainst(API_KEY_LEGACY_HASH, token) // migration
-  );
+  return hasScope(req, "admin");
 }
 
 function respond401(res: Response) {
   return res.status(401).json({ error: "Unauthorized" });
 }
-function respond403(res: Response, want: "read" | "export" | "admin") {
+function respond403(res: Response, want: Scope) {
   return res.status(403).json({
     error: "Forbidden",
     hint: `This operation requires ${want} key. Check your Authorization: Bearer <token>.`,
@@ -102,8 +138,15 @@ function respond403(res: Response, want: "read" | "export" | "admin") {
 
 const corsOptions: CorsOptions = {
   origin: (origin, callback) => {
-    if (!origin) return callback(null, false);
+    if (!origin) {
+      // ブラウザ以外（curl など）からのアクセスは CORS なしで来ることもあるので、
+      // 単に拒否しておく（エラーにはしない）
+      log("[CORS] blocked request without Origin header");
+      return callback(null, false);
+    }
     if (origin === UI_ORIGIN) return callback(null, true);
+
+    log("[CORS] blocked origin:", origin);
     return callback(null, false);
   },
   methods: ["GET", "POST", "PATCH", "DELETE", "OPTIONS"],
@@ -118,8 +161,9 @@ app.use(express.json({ limit: "1mb" }));
 // minimal audit log（読みやすさのため簡潔化）
 app.use((req: Request, _res: Response, next: NextFunction) => {
   const len = Number(req.headers["content-length"] || 0);
-  const hasBody = len > 0 || (req.body && typeof req.body === "object" && Object.keys(req.body).length > 0);
-  console.log(`[${new Date().toISOString()}] ${req.method} ${req.path} body:${hasBody ? "yes" : "no"}`);
+  const hasBody =
+    len > 0 || (req.body && typeof req.body === "object" && Object.keys(req.body).length > 0);
+  log(`${req.method} ${req.path} body:${hasBody ? "yes" : "no"}`);
   next();
 });
 
@@ -151,7 +195,7 @@ function normalizeTags(input: any): string[] {
     .map((x) => (typeof x === "string" ? x.trim() : ""))
     .filter((x) => x.length > 0)
     .map((x) =>
-      x.replace(/[\uFF01-\uFF5E]/g, (ch) => String.fromCharCode(ch.charCodeAt(0) - 0xFEE0))
+      x.replace(/[\uFF01-\uFF5E]/g, (ch) => String.fromCharCode(ch.charCodeAt(0) - 0xfee0))
     )
     .map((x) => (/^[A-Za-z0-9]+$/.test(x) ? x.toLowerCase() : x));
   return Array.from(new Set(cleaned));
@@ -293,7 +337,7 @@ function buildNotesFilters(req: Request) {
   const whereParts: string[] = [];
   const values: any[] = [];
 
-  // >>> default filter (soft delete) <<<
+  // default filter (soft delete)
   if (!includeDeleted(req)) {
     whereParts.push("deleted_at IS NULL");
   }
@@ -492,7 +536,7 @@ app.get("/notes", requireReadOrAdmin, async (req, res) => {
       whereParts.push(`similarity(content, $${i}) >= $${j}`);
     }
 
-    // === Cursor (order_by-aware) ===
+    // Cursor (order_by-aware)
     if (cursor && !req.query.offset) {
       const cmp = order === "asc" ? ">" : "<";
       if (orderBy === "created_at") {
@@ -558,7 +602,7 @@ app.get("/notes", requireReadOrAdmin, async (req, res) => {
           : `id_${order}`;
 
       const payload = {
-        results: [],
+        results: [] as any[],
         message: "一致するノートは見つかりませんでした。",
         tips,
         echo: {
@@ -577,12 +621,7 @@ app.get("/notes", requireReadOrAdmin, async (req, res) => {
 
     if (!req.query.offset && rows && rows.length === limit) {
       const last = rows[rows.length - 1];
-      const cur =
-        orderBy === "updated_at"
-          ? encodeCursor(last.created_at, last.updated_at, last.id)
-          : orderBy === "created_at"
-          ? encodeCursor(last.created_at, last.updated_at, last.id)
-          : encodeCursor(last.created_at, last.updated_at, last.id);
+      const cur = encodeCursor(last.created_at, last.updated_at, last.id);
       res.setHeader("X-Next-Cursor", cur);
     }
 
@@ -799,7 +838,7 @@ app.delete("/notes/:id", requireAdmin, async (req, res) => {
       returning id
     `;
     if (!rows || rows.length === 0) return res.status(404).json({ error: "not found" });
-    console.log(`[soft-delete] id=${id}`);
+    log(`[soft-delete] id=${id}`);
     res.status(204).send();
   } catch (e) {
     console.error(e);
@@ -820,7 +859,7 @@ app.post("/notes/:id/restore", requireAdmin, async (req, res) => {
       returning id, content, tags, created_at, updated_at, deleted_at
     `;
     if (!rows || rows.length === 0) return res.status(404).json({ error: "not found" });
-    console.log(`[restore] id=${id}`);
+    log(`[restore] id=${id}`);
     res.json(rows[0]);
   } catch (e) {
     console.error(e);
@@ -830,5 +869,5 @@ app.post("/notes/:id/restore", requireAdmin, async (req, res) => {
 
 /* ===== Listen ===== */
 app.listen(PORT, () => {
-  console.log(`Server listening on :${PORT}`);
+  log(`Server listening on :${PORT}`);
 });
