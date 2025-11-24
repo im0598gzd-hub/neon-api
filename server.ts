@@ -1,5 +1,9 @@
 // server.ts (three-scope auth: READ / EXPORT / ADMIN)
 
+/* =========================
+ [1] アプリ初期化・基本設定
+========================= */
+
 import express, { Request, Response, NextFunction } from "express";
 import cors, { CorsOptions } from "cors";
 import { neon } from "@neondatabase/serverless";
@@ -51,7 +55,9 @@ function log(...args: any[]) {
 
 const sql = neon(DATABASE_URL);
 
-/* ===== Types ===== */
+/* =========================
+ [2] セキュリティ & 認証ヘルパー
+========================= */
 
 interface Note {
   id: number;
@@ -61,8 +67,6 @@ interface Note {
   updated_at: string;
   deleted_at: string | null;
 }
-
-/* ===== Security helpers ===== */
 
 function sha256Buf(s: string): Buffer {
   return crypto.createHash("sha256").update(s, "utf8").digest();
@@ -128,8 +132,9 @@ function respond403(res: Response, want: Scope) {
     hint: `This operation requires ${want} key. Check your Authorization: Bearer <token>.`,
   });
 }
-
-/* ===== Middlewares ===== */
+/* =========================
+ [3] ミドルウェア（CORS / JSON / audit）
+========================= */
 
 /*
 =======================================
@@ -171,7 +176,9 @@ app.use((req, _res, next) => {
   next();
 });
 
-/* ===== Auth middlewares ===== */
+/* =========================
+ [4] 認証ミドルウェア（requireX）
+========================= */
 
 function requireReadOrAdmin(req: Request, res: Response, next: NextFunction) {
   const token = getBearer(req);
@@ -192,7 +199,9 @@ function requireAdmin(req: Request, res: Response, next: NextFunction) {
   return respond403(res, "admin");
 }
 
-/* ===== Helpers ===== */
+/* =========================
+ [5] 入力整形・バリデーション・共通ヘルパー
+========================= */
 
 function normalizeTags(input: any): string[] {
   if (!Array.isArray(input)) return [];
@@ -270,7 +279,6 @@ function includeDeleted(req: Request): boolean {
     req.query.include_deleted.toLowerCase() === "true";
   return flag && hasAdmin(req);
 }
-
 /* ===== Validation ===== */
 
 const MAX_CONTENT_LEN = 2000;
@@ -406,7 +414,6 @@ function buildNotesFilters(req: Request) {
 
   return { whereClause, values, q, qLen, q_mode } as const;
 }
-
 /* ===== tips builder ===== */
 
 function buildZeroResultTips(opts: {
@@ -479,7 +486,9 @@ function formatFriendlyTips(message: string, tips: string[], echo: any) {
     .join("\n");
 }
 
-/* ===== /health ===== */
+/* =========================
+ [6] GET 系エンドポイント
+========================= */
 
 app.get("/health", (_req, res) => res.json({ ok: true }));
 
@@ -497,7 +506,6 @@ app.get("/_status", async (_req, res) => {
     res.status(500).json({ app: "ng" });
   }
 });
-
 /* ===== GET /notes ===== */
 
 app.get("/notes", requireReadOrAdmin, async (req, res) => {
@@ -652,8 +660,9 @@ app.get("/notes/count", requireReadOrAdmin, async (req, res) => {
     res.status(500).json({ error: "Internal Server Error" });
   }
 });
-
-/* ===== CSV Export ===== */
+/* =========================
+ [7] CSV Export 系
+========================= */
 
 app.get("/export.csv", requireExport, async (req, res) => {
   await handleExportCsv(req, res);
@@ -768,7 +777,9 @@ async function handleExportCsv(req: Request, res: Response) {
   }
 }
 
-/* ===== POST /notes ===== */
+/* =========================
+ [8] 変更系 (POST / PATCH / DELETE / restore)
+========================= */
 
 app.post("/notes", requireAdmin, async (req, res) => {
   try {
@@ -789,8 +800,6 @@ app.post("/notes", requireAdmin, async (req, res) => {
     res.status(500).json({ error: "Internal Server Error" });
   }
 });
-
-/* ===== PATCH /notes/:id ===== */
 
 app.patch("/notes/:id", requireAdmin, async (req, res) => {
   try {
@@ -829,8 +838,6 @@ app.patch("/notes/:id", requireAdmin, async (req, res) => {
   }
 });
 
-/* ===== DELETE /notes/:id ===== */
-
 app.delete("/notes/:id", requireAdmin, async (req, res) => {
   try {
     const id = Number(req.params.id);
@@ -850,8 +857,6 @@ app.delete("/notes/:id", requireAdmin, async (req, res) => {
     res.status(500).json({ error: "Internal Server Error" });
   }
 });
-
-/* ===== POST /notes/:id/restore ===== */
 
 app.post("/notes/:id/restore", requireAdmin, async (req, res) => {
   try {
@@ -873,7 +878,9 @@ app.post("/notes/:id/restore", requireAdmin, async (req, res) => {
   }
 });
 
-/* ===== Listen ===== */
+/* =========================
+ [9] Listen
+========================= */
 
 app.listen(PORT, () => {
   log(`Server listening on :${PORT}`);
